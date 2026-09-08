@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 /*
  * API safety net: api.php must never leak PHP warnings/HTML into a JSON
- * response. This keeps the browser-side CRUD and status calls parseable even
- * when a legacy branch throws a warning or an unexpected exception.
+ * response. This keeps browser requests parseable even when a legacy branch
+ * throws a warning or unexpected exception.
  */
 if (PHP_SAPI !== 'cli') {
     $script = basename((string)($_SERVER['SCRIPT_FILENAME'] ?? ''));
@@ -34,24 +34,18 @@ if (PHP_SAPI !== 'cli') {
                 'success' => false,
                 'error' => 'API вернул некорректный ответ',
                 'details' => $trimmed !== '' ? mb_substr(strip_tags($trimmed), 0, 1000) : null,
-            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         });
     }
 }
 
 return [
-
     'refresh' => 600,
-
-    // UTM is on the LAN; a failed endpoint must not freeze the dashboard.
     'timeout' => 1,
-
     'storage' => [
         'file' => __DIR__ . '/utms.json'
     ],
-
     'utms' => [
-
         1 => [
             'id' => 1,
             'name' => 'Сникерс',
@@ -59,7 +53,6 @@ return [
             'port' => 8086,
             'enabled' => true
         ],
-
         2 => ['id'=>2,'name'=>'УТМ №2','ip'=>'','port'=>8086,'enabled'=>false],
         3 => ['id'=>3,'name'=>'УТМ №3','ip'=>'','port'=>8086,'enabled'=>false],
         4 => ['id'=>4,'name'=>'УТМ №4','ip'=>'','port'=>8086,'enabled'=>false],
@@ -69,7 +62,5 @@ return [
         8 => ['id'=>8,'name'=>'УТМ №8','ip'=>'','port'=>8086,'enabled'=>false],
         9 => ['id'=>9,'name'=>'УТМ №9','ip'=>'','port'=>8086,'enabled'=>false],
         10 => ['id'=>10,'name'=>'УТМ №10','ip'=>'','port'=>8086,'enabled'=>false]
-
     ]
-
 ];
