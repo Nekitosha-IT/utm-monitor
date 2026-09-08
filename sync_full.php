@@ -5,26 +5,340 @@ require_once __DIR__ . '/includes/database.php';
 require_once __DIR__ . '/includes/utm_repository.php';
 require_once __DIR__ . '/sync.php';
 
-function fullSyncValue(array $row, array $keys): ?string { foreach ($keys as $key) { if (!array_key_exists($key,$row)||$row[$key]===null) continue; if (is_scalar($row[$key])) { $v=trim((string)$row[$key]); if ($v!=='') return $v; } } return null; }
-function fullSyncUrl(array $row): ?string { return fullSyncValue($row,['url','href','link','documentUrl','documentURL','xmlUrl','xmlURL','downloadUrl','downloadURL','path']); }
-function fullSyncRows(array $data): array { $candidates=[$data['data']['rows']??null,$data['data']['items']??null,$data['data']??null,$data['rows']??null,$data['items']??null,$data['documents']??null,$data['result']??null]; foreach($candidates as $candidate) if(is_array($candidate)&&array_is_list($candidate)) return $candidate; return []; }
-function fullSyncList(PDO $db,array $utm,string $direction,int $limit,array &$result): void {
- $response=syncGetDbList((string)$utm['ip'],(int)$utm['port'],$direction,$limit,0);
- if(!$response['ok']){$result[$direction]['errors']++;$result['errors'][]=['stage'=>$direction.'_list','error'=>$response['error']];return;}
- $rows=fullSyncRows($response['data']);$result[$direction]['found']=count($rows);
- foreach($rows as $row){if(!is_array($row))continue;try{
-  $url=fullSyncUrl($row);$xml=fullSyncValue($row,['xml','rawXml','raw_xml','content']);
-  if($xml!==null&&str_starts_with(ltrim($xml),'<')){$saved=syncSaveOneDocument($db,(int)$utm['id'],$direction,$url??('list:'.hash('sha256',$xml)),$xml);$result[$direction]['saved']++;$result['documents'][]=['source'=>'db_list','direction'=>$direction,'document'=>$saved];continue;}
-  if($url!==null){$document=syncFetchDocument((string)$utm['ip'],(int)$utm['port'],$url);if($document['ok']&&is_string($document['data'])&&trim($document['data'])!==''){$saved=syncSaveOneDocument($db,(int)$utm['id'],$direction,$url,$document['data']);$result[$direction]['saved']++;$result['documents'][]=['source'=>'db_list','url'=>$url,'direction'=>$direction,'document'=>$saved];continue;}}
-  $documentId=fullSyncValue($row,['documentId','documentID','docId','id','uuid','wbRegId','WBRegId','regId','RegID']);if($documentId===null)continue;
-  $documentType=fullSyncValue($row,['documentType','document_type','type','docType'])??'DB_LIST';$number=fullSyncValue($row,['number','NUMBER','wbNumber','WBNUMBER']);$date=fullSyncValue($row,['documentDate','document_date','date','docDate','WBDate']);$status=fullSyncValue($row,['status','state','Status','State']);$statusCode=fullSyncValue($row,['statusCode','status_code','code']);$sender=fullSyncValue($row,['sender','senderId','senderRegId','shipper']);$receiver=fullSyncValue($row,['receiver','receiverId','receiverRegId','consignee']);
-  $savedId=saveDocument($db,(int)$utm['id'],$documentId,$documentType,$direction,$number,$date,$sender,$receiver,$status,$statusCode,json_encode($row,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));$result[$direction]['saved']++;$result['documents'][]=['source'=>'db_list_metadata','direction'=>$direction,'document'=>['db_id'=>$savedId,'document_id'=>$documentId,'document_type'=>$documentType,'direction'=>$direction,'number'=>$number,'status'=>$status]];
- }catch(Throwable $e){$result[$direction]['errors']++;$result['errors'][]=['stage'=>$direction.'_save','error'=>$e->getMessage()];}}
+function fullSyncValue(array $row, array $keys): ?string
+{
+    foreach ($keys as $key) {
+        if (!array_key_exists($key, $row) || $row[$key] === null) {
+            continue;
+        }
+        if (is_scalar($row[$key])) {
+            $value = trim((string)$row[$key]);
+            if ($value !== '') {
+                return $value;
+            }
+        }
+    }
+    return null;
 }
-function syncUtmFull(PDO $db,array $utm,int $limit=100): array {
- $result=['success'=>true,'utm'=>['id'=>(int)$utm['id'],'name'=>$utm['name']??'','ip'=>(string)$utm['ip'],'port'=>(int)$utm['port']],'incoming'=>['found'=>0,'saved'=>0,'errors'=>0],'outgoing'=>['found'=>0,'saved'=>0,'errors'=>0],'queue'=>['found'=>0,'saved'=>0,'errors'=>0],'documents'=>[],'errors'=>[]];
- fullSyncList($db,$utm,'incoming',$limit,$result);fullSyncList($db,$utm,'outgoing',$limit,$result);$queue=syncGetOutQueue((string)$utm['ip'],(int)$utm['port']);
- if(!$queue['ok']){$result['queue']['errors']++;$result['errors'][]=['stage'=>'opt_out','error'=>$queue['error']];}else{$dom=new DOMDocument();$previous=libxml_use_internal_errors(true);$loaded=$dom->loadXML((string)$queue['data'],LIBXML_NONET|LIBXML_NOBLANKS);libxml_clear_errors();libxml_use_internal_errors($previous);if(!$loaded){$result['queue']['errors']++;$result['errors'][]=['stage'=>'opt_out_xml','error'=>'Некорректный XML /opt/out'];}else{$xpath=new DOMXPath($dom);$nodes=$xpath->query('//*[local-name()="url"]');$result['queue']['found']=$nodes instanceof DOMNodeList?$nodes->length:0;if($nodes instanceof DOMNodeList)foreach($nodes as $node){if(!$node instanceof DOMElement)continue;$url=trim($node->textContent);if($url==='')continue;try{$doc=syncFetchDocument((string)$utm['ip'],(int)$utm['port'],$url);if(!$doc['ok'])throw new RuntimeException($doc['error']);$saved=syncSaveOneDocument($db,(int)$utm['id'],'outgoing',$url,(string)$doc['data']);$result['queue']['saved']++;$result['documents'][]=['source'=>'opt_out','url'=>$url,'document'=>$saved];}catch(Throwable $e){$result['queue']['errors']++;$result['errors'][]=['stage'=>'queue_document','url'=>$url,'error'=>$e->getMessage()];}}}}}
- addEvent($db,(int)$utm['id'],count($result['errors'])>0?'warning':'info','sync','Полная синхронизация УТМ завершена',json_encode($result,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES));return $result;
+
+function fullSyncUrl(array $row): ?string
+{
+    return fullSyncValue($row, [
+        'url', 'href', 'link', 'documentUrl', 'documentURL',
+        'xmlUrl', 'xmlURL', 'downloadUrl', 'downloadURL', 'path'
+    ]);
 }
-if(PHP_SAPI==='cli'){ $utmId=null;$limit=100;foreach($argv as $arg){if(preg_match('/^--utm=(\d+)$/',$arg,$m))$utmId=(int)$m[1];if(preg_match('/^--limit=(\d+)$/',$arg,$m))$limit=max(1,min(1000,(int)$m[1]));}if($utmId===null){fwrite(STDERR,"Использование: php sync_full.php --utm=ID [--limit=100]\n");exit(1);}try{$db=require __DIR__.'/includes/database.php';$utm=getUtm($db,$utmId);if($utm===null)throw new RuntimeException("УТМ с ID {$utmId} не найден в базе данных");$result=syncUtmFull($db,$utm,$limit);echo json_encode($result,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_PRETTY_PRINT).PHP_EOL;exit(!empty($result['errors'])?2:0);}catch(Throwable $e){fwrite(STDERR,json_encode(['success'=>false,'error'=>$e->getMessage()],JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES).PHP_EOL);exit(1);}}
+
+function fullSyncRows(array $data): array
+{
+    $candidates = [
+        $data['data']['rows'] ?? null,
+        $data['data']['items'] ?? null,
+        $data['data'] ?? null,
+        $data['rows'] ?? null,
+        $data['items'] ?? null,
+        $data['documents'] ?? null,
+        $data['result'] ?? null,
+    ];
+
+    foreach ($candidates as $candidate) {
+        if (is_array($candidate) && array_is_list($candidate)) {
+            return $candidate;
+        }
+    }
+
+    return [];
+}
+
+function fullSyncList(PDO $db, array $utm, string $direction, int $limit, array &$result): void
+{
+    $response = syncGetDbList(
+        (string)$utm['ip'],
+        (int)$utm['port'],
+        $direction,
+        $limit,
+        0
+    );
+
+    if (!$response['ok']) {
+        $result[$direction]['errors']++;
+        $result['errors'][] = [
+            'stage' => $direction . '_list',
+            'error' => $response['error'],
+        ];
+        return;
+    }
+
+    $rows = fullSyncRows($response['data']);
+    $result[$direction]['found'] = count($rows);
+
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        try {
+            $url = fullSyncUrl($row);
+            $xml = fullSyncValue($row, ['xml', 'rawXml', 'raw_xml', 'content']);
+
+            if ($xml !== null && str_starts_with(ltrim($xml), '<')) {
+                $saved = syncSaveOneDocument(
+                    $db,
+                    (int)$utm['id'],
+                    $direction,
+                    $url ?? ('list:' . hash('sha256', $xml)),
+                    $xml
+                );
+
+                $result[$direction]['saved']++;
+                $result['documents'][] = [
+                    'source' => 'db_list',
+                    'direction' => $direction,
+                    'document' => $saved,
+                ];
+                continue;
+            }
+
+            if ($url !== null) {
+                $document = syncFetchDocument(
+                    (string)$utm['ip'],
+                    (int)$utm['port'],
+                    $url
+                );
+
+                if (
+                    $document['ok'] &&
+                    is_string($document['data']) &&
+                    trim($document['data']) !== ''
+                ) {
+                    $saved = syncSaveOneDocument(
+                        $db,
+                        (int)$utm['id'],
+                        $direction,
+                        $url,
+                        $document['data']
+                    );
+
+                    $result[$direction]['saved']++;
+                    $result['documents'][] = [
+                        'source' => 'db_list',
+                        'url' => $url,
+                        'direction' => $direction,
+                        'document' => $saved,
+                    ];
+                    continue;
+                }
+            }
+
+            $documentId = fullSyncValue($row, [
+                'documentId', 'documentID', 'docId', 'id', 'uuid',
+                'wbRegId', 'WBRegId', 'regId', 'RegID'
+            ]);
+
+            if ($documentId === null) {
+                continue;
+            }
+
+            $documentType = fullSyncValue($row, [
+                'documentType', 'document_type', 'type', 'docType'
+            ]) ?? 'DB_LIST';
+            $number = fullSyncValue($row, ['number', 'NUMBER', 'wbNumber', 'WBNUMBER']);
+            $date = fullSyncValue($row, ['documentDate', 'document_date', 'date', 'docDate', 'WBDate']);
+            $status = fullSyncValue($row, ['status', 'state', 'Status', 'State']);
+            $statusCode = fullSyncValue($row, ['statusCode', 'status_code', 'code']);
+            $sender = fullSyncValue($row, ['sender', 'senderId', 'senderRegId', 'shipper']);
+            $receiver = fullSyncValue($row, ['receiver', 'receiverId', 'receiverRegId', 'consignee']);
+
+            $savedId = saveDocument(
+                $db,
+                (int)$utm['id'],
+                $documentId,
+                $documentType,
+                $direction,
+                $number,
+                $date,
+                $sender,
+                $receiver,
+                $status,
+                $statusCode,
+                json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+            );
+
+            $result[$direction]['saved']++;
+            $result['documents'][] = [
+                'source' => 'db_list_metadata',
+                'direction' => $direction,
+                'document' => [
+                    'db_id' => $savedId,
+                    'document_id' => $documentId,
+                    'document_type' => $documentType,
+                    'direction' => $direction,
+                    'number' => $number,
+                    'status' => $status,
+                ],
+            ];
+        } catch (Throwable $e) {
+            $result[$direction]['errors']++;
+            $result['errors'][] = [
+                'stage' => $direction . '_save',
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+}
+
+function syncUtmFull(PDO $db, array $utm, int $limit = 100): array
+{
+    $result = [
+        'success' => true,
+        'utm' => [
+            'id' => (int)$utm['id'],
+            'name' => $utm['name'] ?? '',
+            'ip' => (string)$utm['ip'],
+            'port' => (int)$utm['port'],
+        ],
+        'incoming' => ['found' => 0, 'saved' => 0, 'errors' => 0],
+        'outgoing' => ['found' => 0, 'saved' => 0, 'errors' => 0],
+        'queue' => ['found' => 0, 'saved' => 0, 'errors' => 0],
+        'documents' => [],
+        'errors' => [],
+    ];
+
+    fullSyncList($db, $utm, 'incoming', $limit, $result);
+    fullSyncList($db, $utm, 'outgoing', $limit, $result);
+
+    $queue = syncGetOutQueue((string)$utm['ip'], (int)$utm['port']);
+
+    if (!$queue['ok']) {
+        $result['queue']['errors']++;
+        $result['errors'][] = [
+            'stage' => 'opt_out',
+            'error' => $queue['error'],
+        ];
+    } else {
+        $dom = new DOMDocument();
+        $previous = libxml_use_internal_errors(true);
+        $loaded = $dom->loadXML(
+            (string)$queue['data'],
+            LIBXML_NONET | LIBXML_NOBLANKS
+        );
+        libxml_clear_errors();
+        libxml_use_internal_errors($previous);
+
+        if (!$loaded) {
+            $result['queue']['errors']++;
+            $result['errors'][] = [
+                'stage' => 'opt_out_xml',
+                'error' => 'Некорректный XML /opt/out',
+            ];
+        } else {
+            $xpath = new DOMXPath($dom);
+            $nodes = $xpath->query('//*[local-name()="url"]');
+            $result['queue']['found'] = $nodes instanceof DOMNodeList ? $nodes->length : 0;
+
+            if ($nodes instanceof DOMNodeList) {
+                foreach ($nodes as $node) {
+                    if (!$node instanceof DOMElement) {
+                        continue;
+                    }
+
+                    $url = trim($node->textContent);
+                    if ($url === '') {
+                        continue;
+                    }
+
+                    try {
+                        $document = syncFetchDocument(
+                            (string)$utm['ip'],
+                            (int)$utm['port'],
+                            $url
+                        );
+
+                        if (!$document['ok']) {
+                            throw new RuntimeException($document['error']);
+                        }
+
+                        $saved = syncSaveOneDocument(
+                            $db,
+                            (int)$utm['id'],
+                            'outgoing',
+                            $url,
+                            (string)$document['data']
+                        );
+
+                        $result['queue']['saved']++;
+                        $result['documents'][] = [
+                            'source' => 'opt_out',
+                            'url' => $url,
+                            'document' => $saved,
+                        ];
+                    } catch (Throwable $e) {
+                        $result['queue']['errors']++;
+                        $result['errors'][] = [
+                            'stage' => 'queue_document',
+                            'url' => $url,
+                            'error' => $e->getMessage(),
+                        ];
+                    }
+                }
+            }
+        }
+    }
+
+    addEvent(
+        $db,
+        (int)$utm['id'],
+        count($result['errors']) > 0 ? 'warning' : 'info',
+        'sync',
+        'Полная синхронизация УТМ завершена',
+        json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)
+    );
+
+    return $result;
+}
+
+if (PHP_SAPI === 'cli') {
+    $utmId = null;
+    $limit = 100;
+
+    foreach ($argv as $arg) {
+        if (preg_match('/^--utm=(\d+)$/', $arg, $matches)) {
+            $utmId = (int)$matches[1];
+        }
+
+        if (preg_match('/^--limit=(\d+)$/', $arg, $matches)) {
+            $limit = max(1, min(1000, (int)$matches[1]));
+        }
+    }
+
+    if ($utmId === null) {
+        fwrite(STDERR, "Использование: php sync_full.php --utm=ID [--limit=100]\n");
+        exit(1);
+    }
+
+    try {
+        $db = require __DIR__ . '/includes/database.php';
+        $utm = getUtm($db, $utmId);
+
+        if ($utm === null) {
+            throw new RuntimeException("УТМ с ID {$utmId} не найден в базе данных");
+        }
+
+        $result = syncUtmFull($db, $utm, $limit);
+        echo json_encode(
+            $result,
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT
+        ) . PHP_EOL;
+
+        exit(!empty($result['errors']) ? 2 : 0);
+    } catch (Throwable $e) {
+        fwrite(
+            STDERR,
+            json_encode(
+                ['success' => false, 'error' => $e->getMessage()],
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+            ) . PHP_EOL
+        );
+        exit(1);
+    }
+}
