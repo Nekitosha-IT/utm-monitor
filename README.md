@@ -1,29 +1,31 @@
 # UTM Monitor
 
-Новая версия проекта — нативное Windows-приложение на **C# / .NET 8 WinForms**.
+Нативное Windows-приложение для мониторинга УТМ ЕГАИС. PHP runtime удалён из новой архитектуры: приложение работает напрямую с УТМ по HTTP.
 
-## Что уже есть
-- SQLite без внешнего сервера
-- до 10 УТМ
-- добавление / изменение / удаление УТМ
-- асинхронная проверка `/api/info/list`
-- жёсткий HTTP timeout, интерфейс не блокируется
-- ONLINE / OFFLINE
-- версия, HTTP-код, время ответа
-- автоматическая проверка каждые 10 секунд
-- self-contained Windows x64 publish
+## Возможности
+- Windows x64, C# / .NET 8 WinForms
+- SQLite в `%LOCALAPPDATA%\UTMMonitor`
+- несколько УТМ: добавление, изменение, удаление, включение/выключение
+- параллельная проверка доступности без блокировки интерфейса
+- `/api/info/list`: ONLINE/OFFLINE, HTTP, задержка, версия, FSRAR/client id
+- автоматический контроль каждые 30 секунд
+- документы: входящие и исходящие, локальное сохранение и обновление
+- RSA/GOST: получение списка сертификатов
+- DataMatrix: разбор Type/Rank/Number
+- QueryBarcode: формирование XML и отправка в `/opt/in/QueryBarcode`
+- журнал операций
+- self-contained single-file EXE для Windows x64
+- GitHub Actions автоматически собирает и публикует артефакт `UTM-Monitor-win-x64`
 
-## Запуск из исходников
+## Запуск
 ```powershell
 dotnet restore .\UTMMonitor\UTMMonitor.csproj
 dotnet run --project .\UTMMonitor\UTMMonitor.csproj
 ```
 
-## Один EXE
+## Сборка одного EXE
 ```powershell
 dotnet publish .\UTMMonitor\UTMMonitor.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o .\publish
 ```
 
-Настройки и SQLite находятся в `%LOCALAPPDATA%\UTMMonitor`.
-
-Старый PHP-код больше не является runtime-частью нового приложения.
+После сборки запускается `publish\UTM Monitor.exe`. На целевом ПК .NET устанавливать не требуется.
