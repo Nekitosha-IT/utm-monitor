@@ -1,5 +1,44 @@
 <?php
 
+declare(strict_types=1);
+
+/*
+ * API safety net: api.php must never leak PHP warnings/HTML into a JSON
+ * response. This keeps the browser-side CRUD and status calls parseable even
+ * when a legacy branch throws a warning or an unexpected exception.
+ */
+if (PHP_SAPI !== 'cli') {
+    $script = basename((string)($_SERVER['SCRIPT_FILENAME'] ?? ''));
+
+    if ($script === 'api.php') {
+        ob_start();
+
+        register_shutdown_function(static function (): void {
+            $output = ob_get_clean();
+            $trimmed = trim((string)$output);
+
+            if ($trimmed !== '') {
+                $decoded = json_decode($trimmed, true);
+
+                if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+                    header('Content-Type: application/json; charset=utf-8');
+                    echo $trimmed;
+                    return;
+                }
+            }
+
+            http_response_code(http_response_code() >= 400 ? http_response_code() : 500);
+            header('Content-Type: application/json; charset=utf-8');
+
+            echo json_encode([
+                'success' => false,
+                'error' => 'API вернул некорректный ответ',
+                'details' => $trimmed !== '' ? mb_substr(strip_tags($trimmed), 0, 1000) : null,
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        });
+    }
+}
+
 return [
 
     'refresh' => 600,
