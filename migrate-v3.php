@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 declare(strict_types=1);
 
 $db = require __DIR__ . '/includes/database.php';
@@ -18,17 +18,13 @@ function addColumn(PDO $db, string $table, string $column, string $definition): 
     echo "ADDED: {$table}.{$column}\n";
 }
 
-/*
- * анные позиции накладной
- */
+/* Данные позиции накладной */
 addColumn($db, 'document_items', 'price', 'REAL NULL');
 addColumn($db, 'document_items', 'fa_reg_id', 'TEXT NULL');
 addColumn($db, 'document_items', 'party_f2_reg_id', 'TEXT NULL');
 addColumn($db, 'document_items', 'amc_count', 'INTEGER NULL');
 
-/*
- * ормализованные данные отправителя/получателя
- */
+/* Нормализованные данные отправителя/получателя */
 addColumn($db, 'documents', 'sender_inn', 'TEXT NULL');
 addColumn($db, 'documents', 'sender_kpp', 'TEXT NULL');
 addColumn($db, 'documents', 'sender_reg_id', 'TEXT NULL');
@@ -73,9 +69,7 @@ $db->exec(
      ON document_links(linked_document_id)'
 );
 
-/*
- * тдельное хранение DataMatrix / AMC
- */
+/* Отдельное хранение DataMatrix / AMC */
 $db->exec(<<<SQL
 CREATE TABLE IF NOT EXISTS document_item_marks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
