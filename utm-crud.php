@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 /*
  * Fast, isolated UTM CRUD endpoint.
- * It never contacts the UTM, so adding/removing a UTM cannot hang on a network timeout.
+ * It never contacts the UTM, so CRUD cannot hang on a network timeout.
  * Every code path returns JSON only.
  */
 
@@ -21,7 +21,9 @@ function crudJson(array $payload, int $status = 200): never
     http_response_code($status);
     echo json_encode(
         $payload,
-        JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+        JSON_UNESCAPED_UNICODE |
+        JSON_UNESCAPED_SLASHES |
+        JSON_INVALID_UTF8_SUBSTITUTE
     );
     exit;
 }
@@ -51,6 +53,7 @@ try {
 
     switch ($action) {
         case 'add':
+        case 'add_utm':
             $name = trim((string)($input['name'] ?? ''));
             $ip = trim((string)($input['ip'] ?? ''));
             $port = (int)($input['port'] ?? 8086);
@@ -66,13 +69,7 @@ try {
                 crudJson(['success' => false, 'error' => 'Порт должен быть от 1 до 65535'], 400);
             }
 
-            $id = addUtm(
-                $db,
-                $name,
-                $ip,
-                $port,
-                $externalId !== '' ? $externalId : null
-            );
+            $id = addUtm($db, $name, $ip, $port, $externalId !== '' ? $externalId : null);
 
             crudJson([
                 'success' => true,
@@ -81,6 +78,7 @@ try {
             ]);
 
         case 'update':
+        case 'update_utm':
             $id = (int)($input['id'] ?? 0);
             $name = trim((string)($input['name'] ?? ''));
             $ip = trim((string)($input['ip'] ?? ''));
@@ -99,27 +97,27 @@ try {
                 crudJson(['success' => false, 'error' => 'Порт должен быть от 1 до 65535'], 400);
             }
 
-            $updated = updateUtm($db, $id, $name, $ip, $port);
-            if (!$updated) {
+            if (!updateUtm($db, $id, $name, $ip, $port)) {
                 crudJson(['success' => false, 'error' => 'УТМ не найден'], 404);
             }
 
             crudJson(['success' => true, 'updated' => true]);
 
         case 'delete':
+        case 'delete_utm':
             $id = (int)($input['id'] ?? ($_GET['id'] ?? 0));
             if ($id <= 0) {
                 crudJson(['success' => false, 'error' => 'Не указан ID УТМ'], 400);
             }
 
-            $deleted = deleteUtm($db, $id);
-            if (!$deleted) {
+            if (!deleteUtm($db, $id)) {
                 crudJson(['success' => false, 'error' => 'УТМ не найден'], 404);
             }
 
             crudJson(['success' => true, 'deleted' => true]);
 
         case 'list':
+        case 'utms':
             $utms = getAllUtms($db);
             crudJson([
                 'success' => true,
