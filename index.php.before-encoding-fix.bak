@@ -1,0 +1,2455 @@
+<?php
+/*
+|--------------------------------------------------------------------------
+| UTM MONITOR
+|--------------------------------------------------------------------------
+| РРЅС‚РµСЂС„РµР№СЃ РјРѕРЅРёС‚РѕСЂРёРЅРіР° РЈРўРњ.
+| API: api.php?action=status
+|--------------------------------------------------------------------------
+*/
+
+?>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>UTM Monitor</title>
+
+    <style>
+        :root {
+            --bg:#070b14; --bg2:#0b1220; --panel:rgba(15,23,42,.86);
+            --border:rgba(148,163,184,.13); --border2:rgba(148,163,184,.24);
+            --text:#f1f5f9; --muted:#8492a8; --green:#22c55e; --red:#ef4444;
+            --orange:#f59e0b; --blue:#3b82f6; --purple:#8b5cf6; --cyan:#06b6d4;
+            --shadow:0 22px 60px rgba(0,0,0,.34);
+        }
+        *{box-sizing:border-box}
+        html{scroll-behavior:smooth}
+        body{margin:0;min-height:100vh;font-family:Inter,Segoe UI,Arial,sans-serif;color:var(--text);
+            background:radial-gradient(circle at 10% 0%,rgba(59,130,246,.14),transparent 30%),
+            radial-gradient(circle at 90% 0%,rgba(139,92,246,.12),transparent 27%),
+            linear-gradient(135deg,var(--bg),var(--bg2));background-attachment:fixed}
+        .header{position:sticky;top:0;z-index:50;padding:20px 30px;background:rgba(7,11,20,.78);border-bottom:1px solid var(--border);
+            backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:0 10px 35px rgba(0,0,0,.2)}
+        .title{font-size:28px;font-weight:850;letter-spacing:.4px}
+        .subtitle{margin-top:5px;color:var(--muted);font-size:12px;letter-spacing:.6px;text-transform:uppercase}
+        .toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+        button{position:relative;min-height:44px;border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:0 18px;cursor:pointer;
+            color:#fff;background:linear-gradient(135deg,#2563eb,#4f46e5 55%,#7c3aed);font:800 12px Inter,Segoe UI,Arial,sans-serif;letter-spacing:.45px;
+            box-shadow:0 10px 28px rgba(37,99,235,.24),inset 0 1px 0 rgba(255,255,255,.12);transition:.2s ease}
+        button:hover{transform:translateY(-2px);filter:brightness(1.08);box-shadow:0 14px 34px rgba(37,99,235,.34),0 0 22px rgba(99,102,241,.14)}
+        button:active{transform:translateY(0) scale(.98)}
+        button.loading{pointer-events:none;opacity:.7}
+        button.loading::after{content:'';width:15px;height:15px;margin-left:9px;border:2px solid rgba(255,255,255,.35);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite}
+        .container{width:min(1700px,calc(100% - 48px));margin:0 auto;padding:28px 0 45px}
+        .stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:15px;margin-bottom:20px}
+        .stat{position:relative;overflow:hidden;min-height:125px;padding:20px;border:1px solid var(--border);border-radius:17px;background:linear-gradient(145deg,rgba(17,25,40,.96),rgba(10,16,28,.88));box-shadow:var(--shadow);transition:.22s ease}
+        .stat:hover{transform:translateY(-3px);border-color:var(--border2)}
+        .stat::after{content:'';position:absolute;right:-50px;top:-50px;width:120px;height:120px;border-radius:50%;background:radial-gradient(circle,rgba(59,130,246,.16),transparent 70%)}
+        .stat-title{color:var(--muted);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.7px}
+        .stat-value{margin-top:10px;font-size:34px;line-height:1;font-weight:900}
+        .section{background:linear-gradient(145deg,rgba(15,23,42,.90),rgba(9,15,27,.88));border:1px solid var(--border);border-radius:17px;margin-bottom:20px;overflow:hidden;box-shadow:var(--shadow)}
+        .section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:16px 20px;font-size:16px;font-weight:800;border-bottom:1px solid var(--border);background:rgba(255,255,255,.015)}
+        .table-wrap{overflow:auto}
+        table{width:100%;min-width:1120px;border-collapse:separate;border-spacing:0}
+        th{padding:13px 15px;color:#718096;background:rgba(0,0,0,.14);border-bottom:1px solid var(--border);font-size:10px;font-weight:800;text-align:left;text-transform:uppercase;letter-spacing:.65px}
+        td{padding:14px 15px;border-bottom:1px solid rgba(148,163,184,.07);font-size:12px;white-space:nowrap}
+        tbody tr{transition:background .18s ease} tbody tr:hover{background:rgba(59,130,246,.045)} tbody tr:last-child td{border-bottom:0}
+        .online{display:inline-flex;align-items:center;gap:7px;color:#86efac;font-weight:800;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.14);padding:6px 9px;border-radius:8px}
+        .online::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 12px rgba(34,197,94,.75);animation:pulse 1.7s infinite}
+        .offline{display:inline-flex;align-items:center;gap:7px;color:#fca5a5;font-weight:800;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.14);padding:6px 9px;border-radius:8px}
+        .offline::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--red)}
+        .valid{color:#4ade80;font-weight:800}.warning{color:#fbbf24;font-weight:800}.critical,.expired,.invalid{color:#f87171;font-weight:800}.unknown{color:var(--muted);font-weight:700}
+        .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:15px;padding:20px}
+        .card{min-width:0;padding:18px;border:1px solid var(--border);border-radius:13px;background:rgba(5,10,19,.52);transition:.2s ease}
+        .card:hover{transform:translateY(-2px);border-color:rgba(96,165,250,.2)}
+        .card h3{margin:0 0 15px;font-size:14px;font-weight:850}
+        .line{display:flex;justify-content:space-between;align-items:center;gap:18px;min-height:38px;padding:8px 0;border-bottom:1px solid rgba(148,163,184,.07)}
+        .line:last-child{border-bottom:0}.label{color:var(--muted);font-size:11px}.value{max-width:68%;text-align:right;font-size:11px;font-weight:700;overflow-wrap:anywhere}
+        .alerts{padding:20px}.alert{padding:14px 16px;border-radius:11px;margin-bottom:10px;background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.12);border-left:4px solid var(--orange)}
+        .alert.critical{border-left-color:var(--red);background:rgba(239,68,68,.06);border-color:rgba(239,68,68,.14)}
+        .muted{color:var(--muted)}.footer{display:flex;justify-content:space-between;gap:15px;padding:18px 4px;color:#536174;font-size:10px}
+        .loading{min-height:140px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:var(--muted);font-size:12px}
+        .loading::before{content:'';width:26px;height:26px;border-radius:50%;border:3px solid rgba(255,255,255,.08);border-top-color:var(--blue);animation:spin .8s linear infinite}
+        @keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.78)}}
+        @media (max-width:1250px){.stats{grid-template-columns:repeat(3,1fr)}.cards{grid-template-columns:repeat(2,1fr)}}
+        @media (max-width:800px){.header{padding:18px}.container{width:calc(100% - 24px);padding-top:20px}.stats{grid-template-columns:repeat(2,1fr)}.cards{grid-template-columns:1fr}}
+        @media (max-width:520px){.stats{grid-template-columns:1fr}.title{font-size:23px}.footer{flex-direction:column}}
+    
+/* =========================================================
+   ADD UTM MODAL
+   ========================================================= */
+
+.utm-modal-overlay {
+    display:none;
+    position:fixed;
+    inset:0;
+    z-index:1000;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    background:rgba(0,0,0,.68);
+    backdrop-filter:blur(8px);
+    -webkit-backdrop-filter:blur(8px);
+}
+
+.utm-modal-overlay.active {
+    display:flex;
+}
+
+.utm-modal {
+    width:min(480px,100%);
+    border:1px solid var(--border2);
+    border-radius:18px;
+    background:linear-gradient(145deg,rgba(17,25,40,.98),rgba(8,14,25,.98));
+    box-shadow:0 30px 90px rgba(0,0,0,.55);
+    overflow:hidden;
+    animation:modalIn .18s ease-out;
+}
+
+@keyframes modalIn {
+    from {
+        opacity:0;
+        transform:translateY(10px) scale(.98);
+    }
+    to {
+        opacity:1;
+        transform:translateY(0) scale(1);
+    }
+}
+
+.utm-modal-header {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:18px 20px;
+    border-bottom:1px solid var(--border);
+}
+
+.utm-modal-title {
+    font-size:16px;
+    font-weight:850;
+}
+
+.utm-modal-close {
+    width:34px;
+    min-height:34px;
+    height:34px;
+    padding:0;
+    border-radius:9px;
+    background:rgba(255,255,255,.05);
+    box-shadow:none;
+    font-size:20px;
+    line-height:1;
+}
+
+.utm-modal-close:hover {
+    background:rgba(239,68,68,.15);
+}
+
+.utm-modal-body {
+    padding:20px;
+}
+
+.utm-form-group {
+    margin-bottom:15px;
+}
+
+.utm-form-group:last-child {
+    margin-bottom:0;
+}
+
+.utm-form-label {
+    display:block;
+    margin-bottom:7px;
+    color:var(--muted);
+    font-size:11px;
+    font-weight:800;
+    text-transform:uppercase;
+    letter-spacing:.55px;
+}
+
+.utm-form-input {
+    width:100%;
+    height:44px;
+    padding:0 13px;
+    border:1px solid var(--border2);
+    border-radius:10px;
+    outline:none;
+    color:var(--text);
+    background:rgba(0,0,0,.25);
+    font:600 13px Inter,Segoe UI,Arial,sans-serif;
+    transition:.18s ease;
+}
+
+.utm-form-input:focus {
+    border-color:rgba(59,130,246,.65);
+    box-shadow:0 0 0 3px rgba(59,130,246,.12);
+}
+
+.utm-form-input::placeholder {
+    color:#526075;
+}
+
+.utm-modal-footer {
+    display:flex;
+    justify-content:flex-end;
+    gap:10px;
+    padding:16px 20px;
+    border-top:1px solid var(--border);
+    background:rgba(0,0,0,.12);
+}
+
+.utm-btn-secondary {
+    background:rgba(255,255,255,.06);
+    box-shadow:none;
+}
+
+.utm-btn-secondary:hover {
+    background:rgba(255,255,255,.1);
+    box-shadow:none;
+}
+
+        .utm-delete-button {
+            min-height: 34px;
+            padding: 0 12px;
+            border-radius: 9px;
+            border: 1px solid rgba(239,68,68,.25);
+            background: rgba(239,68,68,.10);
+            color: #fca5a5;
+            box-shadow: none;
+            font-size: 11px;
+            font-weight: 800;
+        }
+
+        .utm-delete-button:hover {
+            background: rgba(239,68,68,.20);
+            border-color: rgba(239,68,68,.45);
+            color: #fff;
+            box-shadow: 0 8px 20px rgba(239,68,68,.16);
+        }
+
+/* ================= DOCUMENTS ================= */
+
+.doc-section {
+    margin-top: 22px;
+}
+
+.doc-toolbar {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.doc-input,
+.doc-select {
+    background: rgba(255,255,255,.045);
+    border: 1px solid rgba(255,255,255,.10);
+    color: #fff;
+    border-radius: 9px;
+    padding: 10px 12px;
+    outline: none;
+}
+
+.doc-input {
+    min-width: 260px;
+    flex: 1;
+}
+
+.doc-select {
+    min-width: 160px;
+}
+
+.doc-input:focus,
+.doc-select:focus {
+    border-color: rgba(90,170,255,.65);
+}
+
+.doc-table-wrap {
+    overflow-x: auto;
+}
+
+.doc-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.doc-table th {
+    white-space: nowrap;
+}
+
+.doc-table td {
+    vertical-align: middle;
+}
+
+.doc-row {
+    cursor: pointer;
+    transition: background .15s ease;
+}
+
+.doc-row:hover {
+    background: rgba(255,255,255,.045);
+}
+
+.doc-type {
+    font-weight: 700;
+}
+
+.doc-number {
+    color: #72b7ff;
+    font-weight: 700;
+}
+
+.doc-muted {
+    color: #8994a5;
+}
+
+.doc-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.doc-status.ok {
+    color: #65e6a0;
+    background: rgba(45,190,115,.12);
+}
+
+.doc-status.bad {
+    color: #ff7272;
+    background: rgba(255,70,70,.12);
+}
+
+.doc-status.warn {
+    color: #ffd166;
+    background: rgba(255,190,40,.12);
+}
+
+.doc-status.neutral {
+    color: #aeb8c7;
+    background: rgba(255,255,255,.07);
+}
+
+.doc-open {
+    border: 1px solid rgba(100,170,255,.30);
+    background: rgba(60,130,220,.10);
+    color: #8bc5ff;
+    padding: 6px 10px;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.doc-open:hover {
+    background: rgba(60,130,220,.20);
+}
+
+.doc-empty {
+    padding: 30px;
+    text-align: center;
+    color: #8994a5;
+}
+
+.doc-loading {
+    padding: 30px;
+    text-align: center;
+    color: #8994a5;
+}
+
+/* document modal */
+
+.doc-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 5000;
+    background: rgba(0,0,0,.78);
+    backdrop-filter: blur(7px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.doc-modal-overlay.open {
+    display: flex;
+}
+
+.doc-modal {
+    width: min(1250px, 96vw);
+    max-height: 94vh;
+    overflow: auto;
+    background: #111722;
+    border: 1px solid rgba(255,255,255,.10);
+    border-radius: 16px;
+    box-shadow: 0 30px 100px rgba(0,0,0,.65);
+}
+
+.doc-modal-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: rgba(17,23,34,.97);
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    padding: 18px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 15px;
+}
+
+.doc-modal-title {
+    font-size: 20px;
+    font-weight: 800;
+}
+
+.doc-modal-subtitle {
+    color: #8994a5;
+    margin-top: 4px;
+    font-size: 13px;
+}
+
+.doc-modal-close {
+    border: 0;
+    background: rgba(255,255,255,.07);
+    color: #fff;
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+    cursor: pointer;
+    font-size: 20px;
+}
+
+.doc-modal-body {
+    padding: 20px;
+}
+
+.doc-info-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 18px;
+}
+
+.doc-info-card {
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.07);
+    border-radius: 10px;
+    padding: 12px;
+}
+
+.doc-info-label {
+    color: #7e899a;
+    font-size: 11px;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+}
+
+.doc-info-value {
+    font-weight: 700;
+    word-break: break-word;
+}
+
+.doc-parties {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+.doc-party {
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.07);
+    border-radius: 12px;
+    padding: 15px;
+}
+
+.doc-party-title {
+    font-size: 12px;
+    color: #7e899a;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+.doc-party-name {
+    font-weight: 800;
+    margin-bottom: 8px;
+}
+
+.doc-party-line {
+    color: #aeb8c7;
+    font-size: 13px;
+    margin-top: 3px;
+}
+
+.doc-summary {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.doc-summary-card {
+    text-align: center;
+    padding: 14px;
+    border-radius: 11px;
+    background: rgba(255,255,255,.035);
+    border: 1px solid rgba(255,255,255,.07);
+}
+
+.doc-summary-value {
+    font-size: 20px;
+    font-weight: 800;
+}
+
+.doc-summary-label {
+    color: #7e899a;
+    font-size: 11px;
+    margin-top: 3px;
+}
+
+.doc-block {
+    margin-top: 20px;
+}
+
+.doc-block-title {
+    font-size: 15px;
+    font-weight: 800;
+    margin-bottom: 10px;
+}
+
+.doc-item {
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 12px;
+    background: rgba(255,255,255,.025);
+    margin-bottom: 10px;
+    overflow: hidden;
+}
+
+.doc-item-head {
+    padding: 13px 15px;
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    cursor: pointer;
+}
+
+.doc-item-name {
+    font-weight: 800;
+}
+
+.doc-item-meta {
+    color: #8994a5;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+.doc-item-badge {
+    white-space: nowrap;
+    align-self: center;
+}
+
+.doc-item-body {
+    border-top: 1px solid rgba(255,255,255,.07);
+    padding: 14px 15px;
+    display: none;
+}
+
+.doc-item.open .doc-item-body {
+    display: block;
+}
+
+.doc-item-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+}
+
+.doc-field {
+    min-width: 0;
+}
+
+.doc-field-label {
+    color: #778293;
+    font-size: 11px;
+    margin-bottom: 4px;
+}
+
+.doc-field-value {
+    word-break: break-word;
+    font-size: 13px;
+}
+
+.doc-marks {
+    margin-top: 14px;
+}
+
+.doc-marks-toggle {
+    border: 1px solid rgba(255,255,255,.10);
+    background: rgba(255,255,255,.045);
+    color: #bcd9ff;
+    padding: 8px 11px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.doc-marks-list {
+    display: none;
+    margin-top: 10px;
+    max-height: 300px;
+    overflow: auto;
+}
+
+.doc-marks-list.open {
+    display: block;
+}
+
+.doc-mark {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 9px;
+    border-bottom: 1px solid rgba(255,255,255,.05);
+    font-family: Consolas, monospace;
+    font-size: 11px;
+}
+
+.doc-mark-copy {
+    flex: 0 0 auto;
+    border: 0;
+    background: rgba(255,255,255,.07);
+    color: #b8c5d6;
+    border-radius: 5px;
+    padding: 4px 7px;
+    cursor: pointer;
+}
+
+.doc-mark-text {
+    word-break: break-all;
+}
+
+.doc-history {
+    border-left: 2px solid rgba(100,170,255,.35);
+    padding-left: 15px;
+}
+
+.doc-history-entry {
+    margin-bottom: 12px;
+}
+
+.doc-history-date {
+    color: #6f7b8e;
+    font-size: 11px;
+}
+
+.doc-history-status {
+    font-weight: 700;
+    margin-top: 2px;
+}
+
+.doc-history-message {
+    color: #9da8b8;
+    font-size: 12px;
+    margin-top: 3px;
+}
+
+.doc-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.doc-link {
+    border: 1px solid rgba(100,170,255,.25);
+    background: rgba(60,130,220,.08);
+    color: #8bc5ff;
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+}
+
+.doc-raw {
+    margin-top: 15px;
+}
+
+.doc-raw summary {
+    cursor: pointer;
+    color: #8994a5;
+}
+
+.doc-raw pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: #0b1018;
+    padding: 12px;
+    border-radius: 8px;
+    max-height: 350px;
+    overflow: auto;
+    font-size: 11px;
+}
+
+@media (max-width: 900px) {
+    .doc-info-grid,
+    .doc-summary,
+    .doc-item-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .doc-parties {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 600px) {
+    .doc-info-grid,
+    .doc-summary,
+    .doc-item-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .doc-input {
+        min-width: 100%;
+    }
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="header">
+    <div class="title">UTM MONITOR</div>
+    <div class="subtitle">Р¦РµРЅС‚СЂ РјРѕРЅРёС‚РѕСЂРёРЅРіР° Р•Р“РђРРЎ</div>
+
+    <div class="toolbar">
+        <button id="refreshButton" onclick="loadStatus(true)"><span>в†»</span><span>РџР РћР’Р•Р РРўР¬ Р’РЎР•</span></button>
+            <button id="addUtmButton" type="button" onclick="openAddUtmModal()">
+            <span>пј‹</span><span>Р”РћР‘РђР’РРўР¬ РЈРўРњ</span>
+        </button>
+</div>
+</div>
+
+<div class="container">
+
+    <div class="stats">
+        <div class="stat">
+            <div class="stat-title">Р’СЃРµРіРѕ РЈРўРњ</div>
+            <div class="stat-value" id="total">0</div>
+        </div>
+
+        <div class="stat">
+            <div class="stat-title">Online</div>
+            <div class="stat-value" id="online">0</div>
+        </div>
+
+        <div class="stat">
+            <div class="stat-title">Offline</div>
+            <div class="stat-value" id="offline">0</div>
+        </div>
+
+        <div class="stat">
+            <div class="stat-title">RSA</div>
+            <div class="stat-value" id="rsaCount">0</div>
+        </div>
+
+        <div class="stat">
+            <div class="stat-title">GOST</div>
+            <div class="stat-value" id="gostCount">0</div>
+        </div>
+    </div>
+
+
+    <div class="section">
+        <div class="section-title">РЈСЃС‚Р°РЅРѕРІР»РµРЅРЅС‹Рµ РЈРўРњ</div>
+
+        <div id="tableContainer" class="loading">
+            Р—Р°РіСЂСѓР·РєР°...
+        </div>
+    </div>
+
+
+    <div id="detailsContainer"></div>
+<div class="section doc-section">
+    <div class="section-title">РѕРєСѓРјРµРЅС‚С‹</div>
+
+    <div class="doc-toolbar">
+        <input
+            id="docSearch"
+            class="doc-input"
+            type="text"
+            placeholder="РѕРёСЃРє РїРѕ РЅРѕРјРµСЂСѓ, , 2, РѕСЂРіР°РЅРёР·Р°С†РёРё..."
+            oninput="loadDocuments()"
+        >
+
+        <select id="docUtmFilter" class="doc-select" onchange="loadDocuments()">
+            <option value="">СЃРµ Рў</option>
+        </select>
+
+        <select id="docTypeFilter" class="doc-select" onchange="loadDocuments()">
+            <option value="">СЃРµ С‚РёРїС‹</option>
+        </select>
+
+        <select id="docDirectionFilter" class="doc-select" onchange="loadDocuments()">
+            <option value="">СЃРµ РЅР°РїСЂР°РІР»РµРЅРёСЏ</option>
+            <option value="incoming">С…РѕРґСЏС‰РёРµ</option>
+            <option value="outgoing">СЃС…РѕРґСЏС‰РёРµ</option>
+        </select>
+    </div>
+
+    <div id="documentsContainer" class="doc-loading">
+        Р°РіСЂСѓР·РєР° РґРѕРєСѓРјРµРЅС‚РѕРІ...
+    </div>
+</div>
+
+<div
+    id="documentModal"
+    class="doc-modal-overlay"
+    onclick="closeDocumentModalByOverlay(event)"
+>
+    <div class="doc-modal" onclick="event.stopPropagation()">
+        <div class="doc-modal-header">
+            <div>
+                <div id="documentModalTitle" class="doc-modal-title">
+                    РѕРєСѓРјРµРЅС‚
+                </div>
+                <div id="documentModalSubtitle" class="doc-modal-subtitle">
+                    Р°РіСЂСѓР·РєР°...
+                </div>
+            </div>
+
+            <button
+                class="doc-modal-close"
+                type="button"
+                onclick="closeDocumentModal()"
+            >Г—</button>
+        </div>
+
+        <div id="documentModalBody" class="doc-modal-body">
+            Р°РіСЂСѓР·РєР°...
+        </div>
+    </div>
+</div>
+
+
+    <div class="section">
+        <div class="section-title">РџСЂРµРґСѓРїСЂРµР¶РґРµРЅРёСЏ</div>
+
+        <div id="alertsContainer" class="alerts">
+            <div class="muted">РџСЂРµРґСѓРїСЂРµР¶РґРµРЅРёР№ РЅРµС‚.</div>
+        </div>
+    </div>
+
+</div>
+
+<div class="footer">
+    РђРІС‚РѕРѕР±РЅРѕРІР»РµРЅРёРµ: 10 СЃРµРєСѓРЅРґ
+    <span id="lastUpdate"></span>
+</div>
+
+
+
+<!-- =========================================================
+     ADD UTM MODAL
+     ========================================================= -->
+
+<div id="utmModal" class="utm-modal-overlay" onclick="closeUtmModalByOverlay(event)">
+    <div class="utm-modal" role="dialog" aria-modal="true" aria-labelledby="utmModalTitle">
+
+        <div class="utm-modal-header">
+            <div id="utmModalTitle" class="utm-modal-title">Р”РѕР±Р°РІРёС‚СЊ РЈРўРњ</div>
+
+            <button
+                type="button"
+                class="utm-modal-close"
+                onclick="closeUtmModal()"
+                aria-label="Р—Р°РєСЂС‹С‚СЊ"
+            >Г—</button>
+        </div>
+
+        <div class="utm-modal-body">
+
+            <div class="utm-form-group">
+                <label class="utm-form-label" for="utmName">
+                    РќР°Р·РІР°РЅРёРµ РЈРўРњ
+                </label>
+
+                <input
+                    type="text"
+                    id="utmName"
+                    class="utm-form-input"
+                    placeholder="РќР°РїСЂРёРјРµСЂ: РЎРЅРёРєРµСЂСЃ"
+                    autocomplete="off"
+                >
+            </div>
+
+            <div class="utm-form-group">
+                <label class="utm-form-label" for="utmIp">
+                    IP / Host
+                </label>
+
+                <input
+                    type="text"
+                    id="utmIp"
+                    class="utm-form-input"
+                    placeholder="РќР°РїСЂРёРјРµСЂ: 10.0.0.100"
+                    autocomplete="off"
+                >
+            </div>
+
+            <div class="utm-form-group">
+                <label class="utm-form-label" for="utmPort">
+                    РџРѕСЂС‚
+                </label>
+
+                <input
+                    type="number"
+                    id="utmPort"
+                    class="utm-form-input"
+                    placeholder="8086"
+                    value="8086"
+                    min="1"
+                    max="65535"
+                >
+            </div>
+
+        </div>
+
+        <div class="utm-modal-footer">
+
+            <button
+                type="button"
+                class="utm-btn-secondary"
+                onclick="closeUtmModal()"
+            >
+                РћС‚РјРµРЅР°
+            </button>
+
+            <button
+                type="button"
+                onclick="submitAddUtm()"
+            >
+                Р”РѕР±Р°РІРёС‚СЊ
+            </button>
+
+        </div>
+
+    </div>
+</div>
+
+<script>
+
+const API_URL = 'api.php?action=status';
+const REFRESH_SECONDS = 10;
+
+function escapeHtml(value) {
+
+    if (value === null || value === undefined) {
+        return '';
+    }
+
+    return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+}
+
+
+function certificateClass(status) {
+
+    if (!status) {
+        return 'unknown';
+    }
+
+    return status;
+}
+
+
+function certificateStatus(cert) {
+
+    if (!cert) {
+        return '<span class="unknown">РќР•Рў Р”РђРќРќР«РҐ</span>';
+    }
+
+    const cls = certificateClass(cert.status);
+
+    let text = cert.status_text || 'РќРµРёР·РІРµСЃС‚РЅРѕ';
+
+    if (cert.days_left !== null && cert.days_left !== undefined) {
+        text += ' вЂ” ' + cert.days_left + ' РґРЅ.';
+    }
+
+    return '<span class="' + cls + '">' +
+        escapeHtml(text) +
+        '</span>';
+}
+
+
+function certificateDate(cert) {
+
+    if (!cert || !cert.expire_date) {
+        return 'вЂ”';
+    }
+
+    return escapeHtml(cert.expire_date);
+}
+
+
+function renderTable(utms) {
+
+    if (!utms.length) {
+
+        document.getElementById('tableContainer').innerHTML =
+            '<div class="loading">РЈРўРњ РЅРµ РЅР°СЃС‚СЂРѕРµРЅС‹</div>';
+
+        return;
+    }
+
+    let html = `
+        <table>
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>РЈРўРњ</th>
+                    <th>IP</th>
+                    <th>РЎС‚Р°С‚СѓСЃ</th>
+                    <th>API</th>
+                    <th>RSA</th>
+                    <th>GOST</th>
+                    <th>RSA РґРѕ</th>
+                    <th>GOST РґРѕ</th>
+                    <th>Р›РёС†РµРЅР·РёСЏ</th>
+                    <th>Р’РµСЂСЃРёСЏ</th>
+                    <th>РћС‚РІРµС‚</th>
+                    <th>Р”РµР№СЃС‚РІРёСЏ</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+
+    utms.forEach((u, index) => {
+
+        const rsaInfo = u.rsa_info;
+        const gostInfo = u.gost_info;
+
+        let license = 'вЂ”';
+
+        if (u.license) {
+            license = u.license;
+        } else if (u.info && u.info.license) {
+            license = u.info.license;
+        }
+
+        const statusClass =
+            u.online ? 'online' : 'offline';
+
+        const statusText =
+            u.online ? 'ONLINE' : 'OFFLINE';
+
+        html += `
+            <tr>
+                <td>${index + 1}</td>
+
+                <td>
+                    <strong>${escapeHtml(u.name)}</strong>
+                </td>
+
+                <td>
+                    ${escapeHtml(u.ip)}
+                </td>
+
+                <td>
+                    <span class="${statusClass}">
+                        ${statusText}
+                    </span>
+                </td>
+
+                <td>
+                    ${escapeHtml(u.port)}
+                </td>
+
+                <td>
+                    ${rsaInfo ? '1' : '0'}
+                </td>
+
+                <td>
+                    ${gostInfo ? '1' : '0'}
+                </td>
+
+                <td>
+                    ${escapeHtml(
+                        rsaInfo && rsaInfo.valid_to
+                            ? rsaInfo.valid_to
+                            : 'вЂ”'
+                    )}
+                </td>
+
+                <td>
+                    ${escapeHtml(
+                        gostInfo && gostInfo.valid_to
+                            ? gostInfo.valid_to
+                            : 'вЂ”'
+                    )}
+                </td>
+
+                <td>
+                    <span class="${
+                        String(license).toLowerCase().includes('РґРµР№СЃС‚РІ')
+                            ? 'valid'
+                            : 'unknown'
+                    }">
+                        ${escapeHtml(license)}
+                    </span>
+                </td>
+
+                <td>
+                    ${escapeHtml(
+                        u.version ||
+                        (u.info && u.info.version) ||
+                        'вЂ”'
+                    )}
+                </td>
+
+                <td>
+                    ${u.response_ms !== undefined
+                        ? 'РћС‚РІРµС‚ ' + escapeHtml(u.response_ms) + ' РјСЃ'
+                        : 'вЂ”'}
+                </td>
+
+                <td>
+                    <button
+                        type="button"
+                        class="utm-delete-button"
+                        onclick="deleteUtm(${Number(u.id)}, '${escapeHtml(u.name).replaceAll("'", "\\'")}')"
+                    >
+                        рџ—‘ РЈРґР°Р»РёС‚СЊ
+                    </button>
+                </td>
+            </tr>
+        `;
+    });
+
+    html += `
+            </tbody>
+        </table>
+    `;
+
+    document.getElementById('tableContainer').innerHTML = html;
+}
+
+
+async function deleteUtm(id, name) {
+
+    if (!id || Number(id) < 1) {
+        alert('РћС€РёР±РєР°: РЅРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ ID РЈРўРњ.');
+        return;
+    }
+
+    const confirmed = confirm(
+        'РЈРґР°Р»РёС‚СЊ РЈРўРњ?\n\n' +
+        'РќР°Р·РІР°РЅРёРµ: ' + name + '\n' +
+        'ID: ' + id + '\n\n' +
+        'Р­С‚Рѕ РґРµР№СЃС‚РІРёРµ РЅРµР»СЊР·СЏ РѕС‚РјРµРЅРёС‚СЊ.'
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    try {
+
+        const response = await fetch(
+            'api.php?action=delete_utm',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    id: Number(id)
+                })
+            }
+        );
+
+        const text = await response.text();
+
+        let data;
+
+        try {
+            data = JSON.parse(text);
+        } catch (error) {
+            throw new Error(
+                'API РІРµСЂРЅСѓР» РЅРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ JSON: ' + text
+            );
+        }
+
+        if (!response.ok || !data.success) {
+            throw new Error(
+                data.error || 'РќРµ СѓРґР°Р»РѕСЃСЊ СѓРґР°Р»РёС‚СЊ РЈРўРњ.'
+            );
+        }
+
+        alert(
+            'РЈРўРњ СѓСЃРїРµС€РЅРѕ СѓРґР°Р»С‘РЅ.\n\n' +
+            'РќР°Р·РІР°РЅРёРµ: ' + name
+        );
+
+        await loadStatus(true);
+
+    } catch (error) {
+
+        console.error(
+            'РћС€РёР±РєР° СѓРґР°Р»РµРЅРёСЏ РЈРўРњ:',
+            error
+        );
+
+        alert(
+            'РќРµ СѓРґР°Р»РѕСЃСЊ СѓРґР°Р»РёС‚СЊ РЈРўРњ.\n\n' +
+            error.message
+        );
+    }
+}
+
+function renderDetails(utms) {
+
+    let html = '';
+
+    utms.forEach((u, index) => {
+
+        const rsa = u.rsa_info;
+        const gost = u.gost_info;
+
+        html += `
+            <div class="section">
+                <div class="section-title">
+                    РЈРўРњ в„–${index + 1} вЂ” ${escapeHtml(u.name)}
+                </div>
+
+                <div class="cards">
+
+                    <div class="card">
+                        <h3>RSA СЃРµСЂС‚РёС„РёРєР°С‚</h3>
+
+                        <div class="line">
+                            <span class="label">РЎРµСЂС‚РёС„РёРєР°С‚</span>
+                            <span class="value">
+                                ${
+                                    u.rsa_aliases && u.rsa_aliases.length
+                                    ? escapeHtml(u.rsa_aliases.join(', '))
+                                    : 'вЂ”'
+                                }
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РЎС‚Р°С‚СѓСЃ</span>
+                            <span class="value">
+                                ${certificateStatus(rsa)}
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РЎСЂРѕРє РґРµР№СЃС‚РІРёСЏ РґРѕ</span>
+                            <span class="value">
+                                ${certificateDate(rsa)}
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РћСЃС‚Р°Р»РѕСЃСЊ</span>
+                            <span class="value">
+                                ${
+                                    rsa && rsa.days_left !== null
+                                    ? escapeHtml(rsa.days_left) + ' РґРЅРµР№'
+                                    : 'вЂ”'
+                                }
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РР·РґР°С‚РµР»СЊ</span>
+                            <span class="value">
+                                ${escapeHtml(rsa ? rsa.issuer : 'вЂ”')}
+                            </span>
+                        </div>
+                    </div>
+
+
+                    <div class="card">
+                        <h3>GOST СЃРµСЂС‚РёС„РёРєР°С‚</h3>
+
+                        <div class="line">
+                            <span class="label">РЎРµСЂС‚РёС„РёРєР°С‚</span>
+                            <span class="value">
+                                ${
+                                    u.gost_aliases && u.gost_aliases.length
+                                    ? escapeHtml(u.gost_aliases.join(', '))
+                                    : 'вЂ”'
+                                }
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РЎС‚Р°С‚СѓСЃ</span>
+                            <span class="value">
+                                ${certificateStatus(gost)}
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РЎСЂРѕРє РґРµР№СЃС‚РІРёСЏ РґРѕ</span>
+                            <span class="value">
+                                ${certificateDate(gost)}
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РћСЃС‚Р°Р»РѕСЃСЊ</span>
+                            <span class="value">
+                                ${
+                                    gost && gost.days_left !== null
+                                    ? escapeHtml(gost.days_left) + ' РґРЅРµР№'
+                                    : 'вЂ”'
+                                }
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РР·РґР°С‚РµР»СЊ</span>
+                            <span class="value">
+                                ${escapeHtml(gost ? gost.issuer : 'вЂ”')}
+                            </span>
+                        </div>
+                    </div>
+
+
+                    <div class="card">
+                        <h3>РћСЃРЅРѕРІРЅС‹Рµ РїР°СЂР°РјРµС‚СЂС‹ РЈРўРњ</h3>
+
+                        <div class="line">
+                            <span class="label">Р’РµСЂСЃРёСЏ</span>
+                            <span class="value">
+                                ${escapeHtml(u.version || 'вЂ”')}
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РљРѕРЅС‚СѓСЂ</span>
+                            <span class="value">
+                                ${escapeHtml(u.contour || 'вЂ”')}
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">FSRAR ID</span>
+                            <span class="value">
+                                ${escapeHtml(u.owner_id || 'вЂ”')}
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">Р›РёС†РµРЅР·РёСЏ</span>
+                            <span class="value">
+                                ${
+                                    u.license === true
+                                    ? '<span class="valid">Р”Р•Р™РЎРўР’РЈР•Рў</span>'
+                                    : '<span class="critical">РќР•Рў</span>'
+                                }
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">Р‘Р°Р·Р° РЈРўРњ</span>
+                            <span class="value">
+                                ${escapeHtml(
+                                    u.db && u.db.create_date
+                                    ? u.db.create_date
+                                    : 'вЂ”'
+                                )}
+                            </span>
+                        </div>
+                    </div>
+
+
+                    <div class="card">
+                        <h3>Р”РѕРєСѓРјРµРЅС‚С‹</h3>
+
+                        <div class="line">
+                            <span class="label">Р’С…РѕРґСЏС‰РёРµ</span>
+                            <span class="value">
+                                ${
+                                    u.documents &&
+                                    u.documents.incoming !== null
+                                    ? escapeHtml(u.documents.incoming)
+                                    : 'вЂ”'
+                                }
+                            </span>
+                        </div>
+
+                        <div class="line">
+                            <span class="label">РСЃС…РѕРґСЏС‰РёРµ</span>
+                            <span class="value">
+                                ${
+                                    u.documents &&
+                                    u.documents.outgoing !== null
+                                    ? escapeHtml(u.documents.outgoing)
+                                    : 'вЂ”'
+                                }
+                            </span>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        `;
+    });
+
+    document.getElementById('detailsContainer').innerHTML = html;
+}
+
+
+function renderAlerts(utms) {
+
+    let alerts = [];
+
+    utms.forEach((u, index) => {
+
+        if (Array.isArray(u.warnings)) {
+
+            u.warnings.forEach(w => {
+
+                alerts.push({
+                    index: index + 1,
+                    name: u.name,
+                    level: w.level || 'warning',
+                    message: w.message
+                });
+
+            });
+        }
+
+    });
+
+    const container = document.getElementById('alertsContainer');
+
+    if (!alerts.length) {
+
+        container.innerHTML =
+            '<div class="muted">вњ… РљСЂРёС‚РёС‡РµСЃРєРёС… РїСЂРµРґСѓРїСЂРµР¶РґРµРЅРёР№ РЅРµС‚.</div>';
+
+        return;
+    }
+
+    let html = '';
+
+    alerts.forEach(a => {
+
+        html += `
+            <div class="alert ${escapeHtml(a.level)}">
+                <strong>РЈРўРњ в„–${a.index} вЂ” ${escapeHtml(a.name)}</strong><br>
+                ${escapeHtml(a.message)}
+            </div>
+        `;
+
+    });
+
+    container.innerHTML = html;
+}
+
+
+async function loadStatus(manual = false) {
+
+    const button = document.getElementById('refreshButton');
+    if (manual) button.classList.add('loading');
+
+    try {
+
+        const response = await fetch(
+            API_URL + '&_=' + Date.now(),
+            {
+                cache: 'no-store'
+            }
+        );
+
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(
+                data.error || 'РћС€РёР±РєР° API'
+            );
+        }
+
+        const utms = Array.isArray(data.utms)
+            ? data.utms
+            : [];
+
+        window.__lastUtms = utms;
+        renderDocumentFilters(utms);
+
+        const online = utms.filter(
+            u => u.online
+        ).length;
+
+        const offline = utms.length - online;
+
+        const rsa = utms.reduce(
+            (sum, u) => sum + Number(u.rsa || 0),
+            0
+        );
+
+        const gost = utms.reduce(
+            (sum, u) => sum + Number(u.gost || 0),
+            0
+        );
+
+        document.getElementById('total').textContent = utms.length;
+        document.getElementById('online').textContent = online;
+        document.getElementById('offline').textContent = offline;
+        document.getElementById('rsaCount').textContent = rsa;
+        document.getElementById('gostCount').textContent = gost;
+
+        renderTable(utms);
+        renderDetails(utms);
+        renderAlerts(utms);
+
+        document.getElementById('lastUpdate').textContent =
+            ' | РћР±РЅРѕРІР»РµРЅРѕ: ' +
+            new Date().toLocaleTimeString('ru-RU');
+
+    } catch (error) {
+
+        document.getElementById('tableContainer').innerHTML =
+            '<div class="alert critical">' +
+            'РћС€РёР±РєР° РјРѕРЅРёС‚РѕСЂРёРЅРіР°: ' +
+            escapeHtml(error.message) +
+            '</div>';
+
+    } finally {
+        if (button) button.classList.remove('loading');
+    }
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| РџРµСЂРІС‹Р№ Р·Р°РїСѓСЃРє
+|--------------------------------------------------------------------------
+*/
+loadStatus();
+
+
+/*
+|--------------------------------------------------------------------------
+| РђРІС‚РѕРѕР±РЅРѕРІР»РµРЅРёРµ
+|--------------------------------------------------------------------------
+*/
+setInterval(
+    loadStatus,
+    REFRESH_SECONDS * 1000
+);
+
+
+
+/* =========================================================
+   ADD UTM MODAL
+   ========================================================= */
+
+function openAddUtmModal() {
+    const modal = document.getElementById('utmModal');
+
+    if (!modal) {
+        console.error('utmModal РЅРµ РЅР°Р№РґРµРЅ');
+        return;
+    }
+
+    modal.classList.add('active');
+
+    const nameInput = document.getElementById('utmName');
+
+    if (nameInput) {
+        setTimeout(function () {
+            nameInput.focus();
+        }, 50);
+    }
+}
+
+function closeUtmModal() {
+    const modal = document.getElementById('utmModal');
+
+    if (!modal) {
+        return;
+    }
+
+    modal.classList.remove('active');
+}
+
+function closeUtmModalByOverlay(event) {
+    if (event.target === event.currentTarget) {
+        closeUtmModal();
+    }
+}
+
+function submitAddUtm() {
+
+    const nameElement = document.getElementById('utmName');
+    const ipElement = document.getElementById('utmIp');
+    const portElement = document.getElementById('utmPort');
+
+    if (!nameElement || !ipElement || !portElement) {
+        alert('РћС€РёР±РєР°: СЌР»РµРјРµРЅС‚С‹ С„РѕСЂРјС‹ РЈРўРњ РЅРµ РЅР°Р№РґРµРЅС‹.');
+        return;
+    }
+
+    const name = nameElement.value.trim();
+    const ip = ipElement.value.trim();
+    const port = portElement.value.trim();
+
+    if (!name) {
+        alert('Р’РІРµРґРёС‚Рµ РЅР°Р·РІР°РЅРёРµ РЈРўРњ.');
+        nameElement.focus();
+        return;
+    }
+
+    if (!ip) {
+        alert('Р’РІРµРґРёС‚Рµ IP / Host РЈРўРњ.');
+        ipElement.focus();
+        return;
+    }
+
+    const portNumber = Number(port);
+
+    if (
+        !port ||
+        !Number.isInteger(portNumber) ||
+        portNumber < 1 ||
+        portNumber > 65535
+    ) {
+        alert('Р’РІРµРґРёС‚Рµ РєРѕСЂСЂРµРєС‚РЅС‹Р№ РїРѕСЂС‚ РѕС‚ 1 РґРѕ 65535.');
+        portElement.focus();
+        return;
+    }
+
+    const button = document.querySelector(
+        '#utmModal button[onclick="submitAddUtm()"]'
+    );
+
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Р”РѕР±Р°РІР»РµРЅРёРµ...';
+    }
+
+    fetch('api.php?action=add_utm', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            name: name,
+            ip: ip,
+            port: portNumber
+        })
+    })
+    .then(async function(response) {
+
+        const text = await response.text();
+
+        let data;
+
+        try {
+            data = JSON.parse(text);
+        } catch (error) {
+            throw new Error(
+                'API РІРµСЂРЅСѓР» РЅРµРєРѕСЂСЂРµРєС‚РЅС‹Р№ JSON: ' + text
+            );
+        }
+
+        if (!response.ok || !data.success) {
+            throw new Error(
+                data.error || 'РќРµ СѓРґР°Р»РѕСЃСЊ РґРѕР±Р°РІРёС‚СЊ РЈРўРњ.'
+            );
+        }
+
+        return data;
+    })
+    .then(function(data) {
+
+        closeUtmModal();
+
+        nameElement.value = '';
+        ipElement.value = '';
+        portElement.value = '8080';
+
+        alert(
+            'РЈРўРњ СѓСЃРїРµС€РЅРѕ РґРѕР±Р°РІР»РµРЅ.\n\n' +
+            'РќР°Р·РІР°РЅРёРµ: ' + name + '\n' +
+            'Host: ' + ip + '\n' +
+            'РџРѕСЂС‚: ' + portNumber
+        );
+
+        loadStatus(true);
+    })
+    .catch(function(error) {
+
+        console.error('РћС€РёР±РєР° РґРѕР±Р°РІР»РµРЅРёСЏ РЈРўРњ:', error);
+
+        alert(
+            'РќРµ СѓРґР°Р»РѕСЃСЊ РґРѕР±Р°РІРёС‚СЊ РЈРўРњ.\n\n' +
+            error.message
+        );
+    })
+    .finally(function() {
+
+        if (button) {
+            button.disabled = false;
+            button.textContent = 'Р”РѕР±Р°РІРёС‚СЊ';
+        }
+    });
+}
+document.addEventListener('keydown', function(event) {
+
+    if (event.key === 'Escape') {
+        const modal = document.getElementById('utmModal');
+
+        if (modal && modal.classList.contains('active')) {
+            closeUtmModal();
+        }
+    }
+
+});
+
+</script>
+
+<script>
+/* ============================================================
+   DOCUMENTS
+   ============================================================ */
+
+let documentsCache = [];
+let documentLoading = false;
+
+function docTypeName(type) {
+    const names = {
+        "WayBill_v4": "РўРѕРІР°СЂРЅР°СЏ РЅР°РєР»Р°РґРЅР°СЏ",
+        "FORM2REGINFO": "РµРіРёСЃС‚СЂР°С†РёСЏ 2",
+        "TTNHISTORYF2REG": "СЃС‚РѕСЂРёСЏ РўРў",
+        "ReplyRests_v3": "СЃС‚Р°С‚РєРё",
+        "ReplyRestsShop_v2": "СЃС‚Р°С‚РєРё РјР°РіР°Р·РёРЅР°",
+        "Ticket": "С‚РІРµС‚ Рў",
+        "Documents": "РѕРєСѓРјРµРЅС‚"
+    };
+
+    return names[type] || type || "РѕРєСѓРјРµРЅС‚";
+}
+
+function docStatusClass(status, statusCode) {
+    const s = String(status || statusCode || "").toLowerCase();
+
+    if (
+        s.includes("accept") ||
+        s.includes("РїСЂРёРЅСЏС‚") ||
+        s.includes("success") ||
+        s.includes("РіРѕС‚РѕРІ")
+    ) {
+        return "doc-status-ok";
+    }
+
+    if (
+        s.includes("reject") ||
+        s.includes("РѕС‚РєР»РѕРЅ") ||
+        s.includes("error") ||
+        s.includes("РѕС€РёР±")
+    ) {
+        return "doc-status-error";
+    }
+
+    if (
+        s.includes("process") ||
+        s.includes("РѕР±СЂР°Р±РѕС‚") ||
+        s.includes("wait") ||
+        s.includes("РѕР¶РёРґ")
+    ) {
+        return "doc-status-warn";
+    }
+
+    return "doc-status-neutral";
+}
+
+function docStatusText(status, statusCode) {
+    return status || statusCode || "вЂ”";
+}
+
+function docDate(value) {
+    if (!value) return "вЂ”";
+
+    const d = new Date(value);
+
+    if (Number.isNaN(d.getTime())) {
+        return value;
+    }
+
+    return d.toLocaleString("ru-RU");
+}
+
+function docDirectionText(direction) {
+    if (direction === "incoming") return "С…РѕРґСЏС‰РёР№";
+    if (direction === "outgoing") return "СЃС…РѕРґСЏС‰РёР№";
+    return "вЂ”";
+}
+
+function docPartyName(doc, side) {
+    return doc[side + "_name"] ||
+           doc[side] ||
+           "вЂ”";
+}
+
+function docPartyInn(doc, side) {
+    return doc[side + "_inn"] || "вЂ”";
+}
+
+function docPartyKpp(doc, side) {
+    return doc[side + "_kpp"] || "вЂ”";
+}
+
+function docPartyReg(doc, side) {
+    return doc[side + "_reg_id"] || "вЂ”";
+}
+
+function renderDocumentFilters(utms) {
+    const select = document.getElementById("docUtmFilter");
+
+    if (!select) return;
+
+    const current = select.value;
+
+    select.innerHTML =
+        '<option value="">СЃРµ Рў</option>' +
+        (utms || []).map(utm =>
+            '<option value="' + escapeHtml(String(utm.id)) + '">' +
+            escapeHtml(utm.name || ("Рў #" + utm.id)) +
+            '</option>'
+        ).join("");
+
+    if (
+        current &&
+        Array.from(select.options).some(o => o.value === current)
+    ) {
+        select.value = current;
+    }
+}
+
+function renderDocumentTypeFilter(documents) {
+    const select = document.getElementById("docTypeFilter");
+
+    if (!select) return;
+
+    const current = select.value;
+
+    const types = [...new Set(
+        (documents || [])
+            .map(d => d.document_type)
+            .filter(Boolean)
+    )].sort();
+
+    select.innerHTML =
+        '<option value="">СЃРµ С‚РёРїС‹</option>' +
+        types.map(type =>
+            '<option value="' + escapeHtml(type) + '">' +
+            escapeHtml(docTypeName(type)) +
+            '</option>'
+        ).join("");
+
+    if (
+        current &&
+        types.includes(current)
+    ) {
+        select.value = current;
+    }
+}
+
+function renderDocuments(documents) {
+    const container = document.getElementById("documentsContainer");
+
+    if (!container) return;
+
+    if (!documents || documents.length === 0) {
+        container.innerHTML =
+            '<div class="doc-empty">РѕРєСѓРјРµРЅС‚С‹ РЅРµ РЅР°Р№РґРµРЅС‹.</div>';
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="doc-table-wrap">
+            <table class="doc-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>РўРёРї</th>
+                        <th>РѕРјРµСЂ</th>
+                        <th>Р°С‚Р°</th>
+                        <th>Р°РїСЂР°РІР»РµРЅРёРµ</th>
+                        <th>РЎС‚Р°С‚СѓСЃ</th>
+                        <th>РѕР·РёС†РёР№</th>
+                        <th>Р°СЂРѕРє</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${documents.map(doc => {
+                        const status = docStatusText(
+                            doc.status,
+                            doc.status_code
+                        );
+
+                        return `
+                            <tr
+                                class="doc-row"
+                                onclick="openDocument(${Number(doc.id)})"
+                            >
+                                <td>${escapeHtml(String(doc.id))}</td>
+
+                                <td>
+                                    <strong>
+                                        ${escapeHtml(
+                                            docTypeName(doc.document_type)
+                                        )}
+                                    </strong>
+                                    <div class="doc-type-code">
+                                        ${escapeHtml(
+                                            doc.document_type || "вЂ”"
+                                        )}
+                                    </div>
+                                </td>
+
+                                <td>
+                                    <strong>
+                                        ${escapeHtml(doc.number || "вЂ”")}
+                                    </strong>
+                                </td>
+
+                                <td>
+                                    ${escapeHtml(
+                                        docDate(doc.document_date)
+                                    )}
+                                </td>
+
+                                <td>
+                                    ${escapeHtml(
+                                        docDirectionText(doc.direction)
+                                    )}
+                                </td>
+
+                                <td>
+                                    <span class="doc-status ${
+                                        docStatusClass(
+                                            doc.status,
+                                            doc.status_code
+                                        )
+                                    }">
+                                        ${escapeHtml(status)}
+                                    </span>
+                                </td>
+
+                                <td>
+                                    ${escapeHtml(
+                                        String(doc.items_count ?? 0)
+                                    )}
+                                </td>
+
+                                <td>
+                                    ${escapeHtml(
+                                        String(doc.marks_count ?? 0)
+                                    )}
+                                </td>
+                            </tr>
+                        `;
+                    }).join("")}
+                </tbody>
+            </table>
+        </div>
+    `;
+}
+
+async function loadDocuments() {
+    const container = document.getElementById("documentsContainer");
+
+    if (!container) return;
+
+    if (documentLoading) return;
+
+    documentLoading = true;
+
+    const search =
+        document.getElementById("docSearch")?.value.trim() || "";
+
+    const utm =
+        document.getElementById("docUtmFilter")?.value || "";
+
+    const type =
+        document.getElementById("docTypeFilter")?.value || "";
+
+    const direction =
+        document.getElementById("docDirectionFilter")?.value || "";
+
+    const params = new URLSearchParams();
+
+    params.set("action", "documents");
+    params.set("limit", "500");
+
+    if (search) params.set("q", search);
+    if (utm) params.set("utm_id", utm);
+    if (direction) params.set("direction", direction);
+    if (type) params.set("document_type", type);
+
+    try {
+        const response = await fetch(
+            "api.php?" + params.toString(),
+            {
+                cache: "no-store"
+            }
+        );
+
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(
+                data.error || "С€РёР±РєР° Р·Р°РіСЂСѓР·РєРё РґРѕРєСѓРјРµРЅС‚РѕРІ"
+            );
+        }
+
+        documentsCache = data.documents || [];
+
+        renderDocuments(documentsCache);
+
+    } catch (error) {
+        console.error("loadDocuments:", error);
+
+        container.innerHTML = `
+            <div class="doc-error">
+                С€РёР±РєР° Р·Р°РіСЂСѓР·РєРё РґРѕРєСѓРјРµРЅС‚РѕРІ:
+                ${escapeHtml(error.message)}
+            </div>
+        `;
+    } finally {
+        documentLoading = false;
+    }
+}
+
+async function openDocument(id) {
+    const modal = document.getElementById("documentModal");
+    const body = document.getElementById("documentModalBody");
+
+    if (!modal || !body) return;
+
+    modal.classList.add("open");
+
+    body.innerHTML =
+        '<div class="doc-loading">Р°РіСЂСѓР·РєР° РґРѕРєСѓРјРµРЅС‚Р°...</div>';
+
+    try {
+        const response = await fetch(
+            "api.php?action=document&id=" + encodeURIComponent(id),
+            {
+                cache: "no-store"
+            }
+        );
+
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(
+                data.error || "РѕРєСѓРјРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ"
+            );
+        }
+
+        renderDocumentModal(data.document);
+
+    } catch (error) {
+        body.innerHTML = `
+            <div class="doc-error">
+                ${escapeHtml(error.message)}
+            </div>
+        `;
+    }
+}
+
+function renderDocumentModal(doc) {
+    const title =
+        document.getElementById("documentModalTitle");
+
+    const subtitle =
+        document.getElementById("documentModalSubtitle");
+
+    const body =
+        document.getElementById("documentModalBody");
+
+    if (!title || !subtitle || !body) return;
+
+    title.textContent =
+        docTypeName(doc.document_type);
+
+    subtitle.textContent =
+        (doc.number ? " " + doc.number : "") +
+        (doc.document_date
+            ? " вЂў " + docDate(doc.document_date)
+            : "");
+
+    const summary = doc.summary || {};
+
+    let html = "";
+
+    html += `
+        <div class="doc-summary-grid">
+            <div class="doc-summary-card">
+                <span>РѕР·РёС†РёР№</span>
+                <strong>${escapeHtml(
+                    String(summary.items_count ?? 0)
+                )}</strong>
+            </div>
+
+            <div class="doc-summary-card">
+                <span>РѕР»РёС‡РµСЃС‚РІРѕ</span>
+                <strong>${escapeHtml(
+                    String(summary.quantity ?? 0)
+                )}</strong>
+            </div>
+
+            <div class="doc-summary-card">
+                <span>Р°СЂРѕРє</span>
+                <strong>${escapeHtml(
+                    String(summary.marks_count ?? 0)
+                )}</strong>
+            </div>
+
+            <div class="doc-summary-card">
+                <span>РЎСѓРјРјР°</span>
+                <strong>${escapeHtml(
+                    String(summary.amount ?? 0)
+                )} </strong>
+            </div>
+        </div>
+    `;
+
+    html += `
+        <div class="doc-parties">
+            <div class="doc-party">
+                <div class="doc-party-title">С‚РїСЂР°РІРёС‚РµР»СЊ</div>
+                <strong>${escapeHtml(
+                    docPartyName(doc, "sender")
+                )}</strong>
+
+                <div>: ${escapeHtml(
+                    docPartyInn(doc, "sender")
+                )}</div>
+
+                <div>: ${escapeHtml(
+                    docPartyKpp(doc, "sender")
+                )}</div>
+
+                <div>FSRAR ID: ${escapeHtml(
+                    docPartyReg(doc, "sender")
+                )}</div>
+            </div>
+
+            <div class="doc-party">
+                <div class="doc-party-title">РѕР»СѓС‡Р°С‚РµР»СЊ</div>
+                <strong>${escapeHtml(
+                    docPartyName(doc, "receiver")
+                )}</strong>
+
+                <div>: ${escapeHtml(
+                    docPartyInn(doc, "receiver")
+                )}</div>
+
+                <div>: ${escapeHtml(
+                    docPartyKpp(doc, "receiver")
+                )}</div>
+
+                <div>FSRAR ID: ${escapeHtml(
+                    docPartyReg(doc, "receiver")
+                )}</div>
+            </div>
+        </div>
+    `;
+
+    if (summary.quantity_marks_match !== null &&
+        summary.quantity_marks_match !== undefined) {
+
+        html += `
+            <div class="doc-match ${
+                summary.quantity_marks_match
+                    ? "doc-match-ok"
+                    : "doc-match-error"
+            }">
+                ${
+                    summary.quantity_marks_match
+                        ? "вњ“ РѕР»РёС‡РµСЃС‚РІРѕ РјР°СЂРѕРє СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓРµС‚ РєРѕР»РёС‡РµСЃС‚РІСѓ С‚РѕРІР°СЂР°"
+                        : "вљ  РѕР»РёС‡РµСЃС‚РІРѕ РјР°СЂРѕРє РЅРµ СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓРµС‚ РєРѕР»РёС‡РµСЃС‚РІСѓ С‚РѕРІР°СЂР°"
+                }
+            </div>
+        `;
+    }
+
+    const items = doc.items || [];
+
+    if (items.length) {
+        html += `
+            <div class="doc-block">
+                <div class="doc-block-title">
+                    РўРѕРІР°СЂС‹ (${items.length})
+                </div>
+
+                <div class="doc-items">
+                    ${items.map(
+                        (item, index) =>
+                            renderDocumentItem(item, index)
+                    ).join("")}
+                </div>
+            </div>
+        `;
+    }
+
+    const history = doc.status_history || [];
+
+    if (history.length) {
+        html += `
+            <div class="doc-block">
+                <div class="doc-block-title">
+                    СЃС‚РѕСЂРёСЏ СЃС‚Р°С‚СѓСЃРѕРІ
+                </div>
+
+                <div class="doc-history">
+                    ${history.map(h => `
+                        <div class="doc-history-row">
+                            <div>
+                                ${escapeHtml(
+                                    docDate(h.created_at)
+                                )}
+                            </div>
+
+                            <div>
+                                ${escapeHtml(
+                                    h.old_status || "вЂ”"
+                                )}
+                                в†’
+                                ${escapeHtml(
+                                    h.new_status || "вЂ”"
+                                )}
+                            </div>
+
+                            <div>
+                                ${escapeHtml(
+                                    h.message || ""
+                                )}
+                            </div>
+                        </div>
+                    `).join("")}
+                </div>
+            </div>
+        `;
+    }
+
+    const links = doc.links || [];
+
+    if (links.length) {
+        html += `
+            <div class="doc-block">
+                <div class="doc-block-title">
+                    РЎРІСЏР·Р°РЅРЅС‹Рµ РґРѕРєСѓРјРµРЅС‚С‹
+                </div>
+
+                <div class="doc-links">
+                    ${links.map(link => `
+                        <div class="doc-link-row">
+                            <span>
+                                ${escapeHtml(
+                                    link.link_type || "РЎРІСЏР·СЊ"
+                                )}
+                            </span>
+
+                            <button
+                                class="doc-link-button"
+                                onclick="openDocument(${Number(
+                                    link.linked_document_id
+                                )})"
+                            >
+                                ${escapeHtml(
+                                    link.linked_document_type ||
+                                    "РѕРєСѓРјРµРЅС‚"
+                                )}
+                                ${
+                                    link.linked_document_number
+                                        ? " " +
+                                          escapeHtml(
+                                              link.linked_document_number
+                                          )
+                                        : ""
+                                }
+                            </button>
+                        </div>
+                    `).join("")}
+                </div>
+            </div>
+        `;
+    }
+
+    if (doc.raw_xml) {
+        html += `
+            <div class="doc-block">
+                <div class="doc-block-title">
+                    XML РґРѕРєСѓРјРµРЅС‚Р°
+                </div>
+
+                <details>
+                    <summary>РѕРєР°Р·Р°С‚СЊ XML</summary>
+                    <pre class="doc-raw-xml">${escapeHtml(
+                        doc.raw_xml
+                    )}</pre>
+                </details>
+            </div>
+        `;
+    }
+
+    body.innerHTML = html;
+}
+
+function renderDocumentItem(item, index) {
+    const marks = item.marks || [];
+
+    return `
+        <div class="doc-item-card">
+            <div class="doc-item-header">
+                <div>
+                    <strong>
+                        ${escapeHtml(
+                            item.full_name ||
+                            ("РўРѕРІР°СЂ #" + (index + 1))
+                        )}
+                    </strong>
+                </div>
+
+                <div class="doc-item-qty">
+                    РѕР»РёС‡РµСЃС‚РІРѕ:
+                    <strong>
+                        ${escapeHtml(
+                            String(item.quantity ?? 0)
+                        )}
+                    </strong>
+                </div>
+            </div>
+
+            <div class="doc-item-grid">
+                <div>
+                    <span>РµРЅР°</span>
+                    <strong>
+                        ${escapeHtml(
+                            String(item.price ?? "вЂ”")
+                        )} 
+                    </strong>
+                </div>
+
+                <div>
+                    <span></span>
+                    <strong>
+                        ${escapeHtml(
+                            item.fa_reg_id ||
+                            item.inform_f1_reg_id ||
+                            "вЂ”"
+                        )}
+                    </strong>
+                </div>
+
+                <div>
+                    <span>2</span>
+                    <strong>
+                        ${escapeHtml(
+                            item.party_f2_reg_id ||
+                            item.inform_f2_reg_id ||
+                            "вЂ”"
+                        )}
+                    </strong>
+                </div>
+
+                <div>
+                    <span>Р°СЂРѕРє</span>
+                    <strong>
+                        ${escapeHtml(
+                            String(marks.length)
+                        )}
+                    </strong>
+                </div>
+            </div>
+
+            ${
+                marks.length
+                    ? `
+                        <details class="doc-marks">
+                            <summary>
+                                РѕРєР°Р·Р°С‚СЊ РјР°СЂРєРё (${marks.length})
+                            </summary>
+
+                            <div class="doc-marks-list">
+                                ${marks.map(mark => `
+                                    <div class="doc-mark">
+                                        <code>${escapeHtml(
+                                            mark.amc || mark
+                                        )}</code>
+
+                                        <button
+                                            type="button"
+                                            onclick="copyText(this.dataset.value)"
+                                            data-value="${escapeHtml(
+                                                mark.amc || mark
+                                            )}"
+                                        >
+                                            РѕРїРёСЂРѕРІР°С‚СЊ
+                                        </button>
+                                    </div>
+                                `).join("")}
+                            </div>
+                        </details>
+                    `
+                    : ""
+            }
+        </div>
+    `;
+}
+
+function copyText(value) {
+    if (!navigator.clipboard) {
+        return;
+    }
+
+    navigator.clipboard.writeText(value)
+        .catch(error =>
+            console.error("copy:", error)
+        );
+}
+
+function closeDocumentModal() {
+    const modal =
+        document.getElementById("documentModal");
+
+    if (modal) {
+        modal.classList.remove("open");
+    }
+}
+
+function closeDocumentModalByOverlay(event) {
+    if (event.target &&
+        event.target.id === "documentModal") {
+        closeDocumentModal();
+    }
+}
+
+/* Р°РіСЂСѓР¶Р°РµРј РґРѕРєСѓРјРµРЅС‚С‹ РїРѕСЃР»Рµ Р·Р°РіСЂСѓР·РєРё РѕСЃРЅРѕРІРЅРѕР№ СЃС‚СЂР°РЅРёС†С‹ */
+setTimeout(() => {
+    loadDocuments();
+}, 500);
+</script>
+</body>
+</html>

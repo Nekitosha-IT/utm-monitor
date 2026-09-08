@@ -1,0 +1,1168 @@
+<?php
+declare(strict_types=1);
+
+/**
+ * UTM Monitor document synchronizer.
+ *
+ * Reads:
+ *   /opt/out
+ *   /api/db/in/list
+ *   /api/db/out/list
+ *
+ * Stores:
+ *   documents
+ *   document_items
+ *   events
+ *
+ * Works with:
+ *   Ticket
+ *   ReplyRests_v3
+ *   ReplyRestsShop_v2
+ *   WayBill_v4
+ *   TTNHISTORYF2REG
+ *   FORM2REGINFO
+ */
+
+$config = require __DIR__ . '/config.php';
+$db = require __DIR__ . '/includes/database.php';
+
+if (!isset($db) || !$db instanceof PDO) {
+    throw new RuntimeException('Database connection is not available.');
+}
+
+function syncText(?DOMElement $node): ?string
+{
+    if (!$node) {
+        return null;
+    }
+
+    $value = trim($node->textContent);
+
+    return $value === '' ? null : $value;
+}
+
+function syncFirst(DOMXPath $xpath, DOMNode $context, array $names): ?DOMElement
+{
+    foreach ($names as $name) {
+        $list = $xpath->query(
+            './/*[local-name()="' . $name . '"]',
+            $context
+        );
+
+        if ($list instanceof DOMNodeList && $list->length > 0) {
+            $node = $list->item(0);
+
+            if ($node instanceof DOMElement) {
+                return $node;
+            }
+        }
+    }
+
+    return null;
+}
+
+function syncValue(DOMXPath $xpath, DOMNode $context, array $names): ?string
+{
+    return syncText(syncFirst($xpath, $context, $names));
+}
+
+function syncNumber(?string $value): ?float
+{
+    if ($value === null || trim($value) === '') {
+        return null;
+    }
+
+    $value = str_replace(',', '.', trim($value));
+
+    return is_numeric($value) ? (float)$value : null;
+}
+
+function syncHttpGet(string $url, int $timeout = 15): array
+{
+    $start = microtime(true);
+
+    $context = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'timeout' => $timeout,
+            'ignore_errors' => true,
+            'protocol_version' => 1.1,
+            'header' =>
+                "Accept: application/xml, text/xml, */*\r\n" .
+                "User-Agent: UTM-MONITOR/3.0\r\n" .
+                "Connection: close\r\n"
+        ]
+    ]);
+
+    $data = @file_get_contents($url, false, $context);
+
+    $time = (int)round((microtime(true) - $start) * 1000);
+
+    
+    $status = 200;
+
+    $responseHeaders = function_exists('http_get_last_response_headers')
+        ? http_get_last_response_headers()
+        : [];
+
+    if (is_array($responseHeaders)) {
+        foreach ($responseHeaders as $header) {
+            if (preg_match('/HTTP\/\d+(?:\.\d+)?\s+(\d+)/i', $header, $m)) {
+                $status = (int)$m[1];
+            }
+        }
+    }
+        }
+    }
+
+    if ($data === false) {
+        return [
+            'ok' => false,
+            'status' => $status,
+            'time' => $time,
+            'data' => null,
+            'error' => 'HTTP request failed'
+        ];
+    }
+
+    return [
+        'ok' => $status < 400,
+        'status' => $status,
+        'time' => $time,
+        'data' => $data,
+        'error' => $status >= 400 ? 'HTTP ' . $status : null
+    ];
+}
+
+function syncGetUtm(PDO $db, int $utmId): ?array
+{
+    $stmt = $db->prepare(
+        'SELECT * FROM utms WHERE id = :id LIMIT 1'
+    );
+
+    $stmt->execute([
+        ':id' => $utmId
+    ]);
+
+    $utm = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    return $utm ?: null;
+}
+
+function syncDocumentTableColumns(PDO $db): array
+{
+    $columns = [];
+
+    $stmt = $db->query('PRAGMA table_info(documents)');
+
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $columns[] = $row['name'];
+    }
+
+    return $columns;
+}
+
+function syncSetDocumentField(
+    array &$data,
+    array $columns,
+    string $column,
+    mixed $value
+): void {
+    if (in_array($column, $columns, true)) {
+        $data[$column] = $value;
+    }
+}
+
+function syncDocumentUpsert(
+    PDO $db,
+    int $utmId,
+    array $doc,
+    string $rawXml
+): string {
+    $columns = syncDocumentTableColumns($db);
+
+    $externalId = (string)(
+        $doc['external_id']
+        ?? ''
+    );
+
+    if ($externalId === '') {
+        $externalId = 'queue:' .
+            $doc['document_type'] . ':' .
+            ($doc['queue_id'] ?? sha1($rawXml));
+    }
+
+    $technicalId = 'hash:' . sha1(
+        implode('|', [
+            (string)$doc['document_type'],
+            (string)($doc['direction'] ?? ''),
+            (string)($doc['number'] ?? ''),
+            (string)($doc['document_date'] ?? ''),
+            (string)($doc['sender'] ?? ''),
+            (string)($doc['receiver'] ?? ''),
+            $rawXml
+        ])
+    );
+
+    $data = [];
+
+    syncSetDocumentField($data, $columns, 'id', $technicalId);
+    syncSetDocumentField($data, $columns, 'utm_id', $utmId);
+    syncSetDocumentField($data, $columns, 'external_id', $externalId);
+    syncSetDocumentField($data, $columns, 'direction', $doc['direction'] ?? 'outgoing');
+    syncSetDocumentField($data, $columns, 'document_type', $doc['document_type'] ?? null);
+    syncSetDocumentField($data, $columns, 'doc_type', $doc['document_type'] ?? null);
+    syncSetDocumentField($data, $columns, 'number', $doc['number'] ?? null);
+    syncSetDocumentField($data, $columns, 'document_date', $doc['document_date'] ?? null);
+    syncSetDocumentField($data, $columns, 'sender', $doc['sender'] ?? null);
+    syncSetDocumentField($data, $columns, 'receiver', $doc['receiver'] ?? null);
+    syncSetDocumentField($data, $columns, 'status', $doc['status'] ?? null);
+    syncSetDocumentField($data, $columns, 'raw_xml', $rawXml);
+    syncSetDocumentField($data, $columns, 'created_at', date('Y-m-d H:i:s'));
+    syncSetDocumentField($data, $columns, 'updated_at', date('Y-m-d H:i:s'));
+
+    if (in_array('external_id', $columns, true)) {
+        $stmt = $db->prepare(
+            'SELECT id, status
+             FROM documents
+             WHERE external_id = :external_id
+             LIMIT 1'
+        );
+
+        $stmt->execute([
+            ':external_id' => $externalId
+        ]);
+
+        $existing = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if ($existing) {
+            $sets = [];
+            $params = [
+                ':id' => $existing['id']
+            ];
+
+            foreach ($data as $column => $value) {
+                if ($column === 'id') {
+                    continue;
+                }
+
+                $sets[] = '"' . $column . '" = :' . $column;
+                $params[':' . $column] = $value;
+            }
+
+            if ($sets) {
+                $sql =
+                    'UPDATE documents SET ' .
+                    implode(', ', $sets) .
+                    ' WHERE id = :id';
+
+                $update = $db->prepare($sql);
+                $update->execute($params);
+            }
+
+            if (
+                isset($existing['status']) &&
+                isset($doc['status']) &&
+                $existing['status'] !== $doc['status']
+            ) {
+                if (
+                    in_array(
+                        'document_status_history',
+                        syncTables($db),
+                        true
+                    )
+                ) {
+                    $historyColumns = [];
+
+                    $stmt = $db->query(
+                        'PRAGMA table_info(document_status_history)'
+                    );
+
+                    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                        $historyColumns[] = $row['name'];
+                    }
+
+                    $historyData = [];
+
+                    syncSetDocumentField(
+                        $historyData,
+                        $historyColumns,
+                        'document_id',
+                        $existing['id']
+                    );
+
+                    syncSetDocumentField(
+                        $historyData,
+                        $historyColumns,
+                        'old_status',
+                        $existing['status']
+                    );
+
+                    syncSetDocumentField(
+                        $historyData,
+                        $historyColumns,
+                        'new_status',
+                        $doc['status']
+                    );
+
+                    syncSetDocumentField(
+                        $historyData,
+                        $historyColumns,
+                        'created_at',
+                        date('Y-m-d H:i:s')
+                    );
+
+                    syncInsertDynamic(
+                        $db,
+                        'document_status_history',
+                        $historyData
+                    );
+                }
+            }
+
+            return (string)$existing['id'];
+        }
+    }
+
+    syncInsertDynamic(
+        $db,
+        'documents',
+        $data
+    );
+
+    return $technicalId;
+}
+
+function syncTables(PDO $db): array
+{
+    $tables = [];
+
+    $stmt = $db->query(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'table'"
+    );
+
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $tables[] = $row['name'];
+    }
+
+    return $tables;
+}
+
+function syncInsertDynamic(
+    PDO $db,
+    string $table,
+    array $data
+): void {
+    if (!$data) {
+        return;
+    }
+
+    $columns = array_keys($data);
+
+    $quotedColumns = array_map(
+        static fn(string $column): string => '"' . $column . '"',
+        $columns
+    );
+
+    $placeholders = array_map(
+        static fn(string $column): string => ':' . $column,
+        $columns
+    );
+
+    $sql =
+        'INSERT INTO "' . $table . '" (' .
+        implode(', ', $quotedColumns) .
+        ') VALUES (' .
+        implode(', ', $placeholders) .
+        ')';
+
+    $stmt = $db->prepare($sql);
+
+    $params = [];
+
+    foreach ($data as $column => $value) {
+        $params[':' . $column] = $value;
+    }
+
+    $stmt->execute($params);
+}
+
+function syncDeleteItems(PDO $db, int $documentDbId): void
+{
+    $stmt = $db->prepare(
+        'DELETE FROM document_items
+         WHERE document_id = :document_id'
+    );
+
+    $stmt->execute([
+        ':document_id' => $documentId
+    ]);
+}
+
+function syncSaveItem(
+    PDO $db,
+    int $documentDbId,
+    int $index,
+    array $item
+): void {
+
+    /*
+     * document_items.document_id = INTEGER FK
+     * на documents.id.
+     *
+     * икаких hash:/queue: сюда передавать нельзя.
+     */
+
+    $sql = '
+        INSERT INTO document_items (
+            document_id,
+            item_index,
+            quantity,
+            inform_f1_reg_id,
+            inform_f2_reg_id,
+            alc_percent,
+            alc_percent_min,
+            alc_percent_max,
+            full_name,
+            alc_code,
+            capacity,
+            unit_type,
+            alc_volume,
+            product_v_code,
+            producer_client_reg_id,
+            producer_inn,
+            producer_kpp,
+            producer_full_name,
+            producer_short_name,
+            producer_country,
+            producer_region_code,
+            producer_address,
+            raw_xml,
+            created_at,
+            updated_at
+        ) VALUES (
+            :document_id,
+            :item_index,
+            :quantity,
+            :inform_f1_reg_id,
+            :inform_f2_reg_id,
+            :alc_percent,
+            :alc_percent_min,
+            :alc_percent_max,
+            :full_name,
+            :alc_code,
+            :capacity,
+            :unit_type,
+            :alc_volume,
+            :product_v_code,
+            :producer_client_reg_id,
+            :producer_inn,
+            :producer_kpp,
+            :producer_full_name,
+            :producer_short_name,
+            :producer_country,
+            :producer_region_code,
+            :producer_address,
+            :raw_xml,
+            :created_at,
+            :updated_at
+        )
+    ';
+
+    $stmt = $db->prepare($sql);
+
+    $now = date('Y-m-d H:i:s');
+
+    $stmt->execute([
+        ':document_id' => $documentDbId,
+        ':item_index' => $index,
+        ':quantity' => $item['quantity'] ?? null,
+        ':inform_f1_reg_id' => $item['inform_f1_reg_id'] ?? null,
+        ':inform_f2_reg_id' => $item['inform_f2_reg_id'] ?? null,
+        ':alc_percent' => $item['alc_percent'] ?? null,
+        ':alc_percent_min' => $item['alc_percent_min'] ?? null,
+        ':alc_percent_max' => $item['alc_percent_max'] ?? null,
+        ':full_name' => $item['full_name'] ?? null,
+        ':alc_code' => $item['alc_code'] ?? null,
+        ':capacity' => $item['capacity'] ?? null,
+        ':unit_type' => $item['unit_type'] ?? null,
+        ':alc_volume' => $item['alc_volume'] ?? null,
+        ':product_v_code' => $item['product_v_code'] ?? null,
+        ':producer_client_reg_id' => $item['producer_client_reg_id'] ?? null,
+        ':producer_inn' => $item['producer_inn'] ?? null,
+        ':producer_kpp' => $item['producer_kpp'] ?? null,
+        ':producer_full_name' => $item['producer_full_name'] ?? null,
+        ':producer_short_name' => $item['producer_short_name'] ?? null,
+        ':producer_country' => $item['producer_country'] ?? null,
+        ':producer_region_code' => $item['producer_region_code'] ?? null,
+        ':producer_address' => $item['producer_address'] ?? null,
+        ':raw_xml' => $item['raw_xml'] ?? null,
+        ':created_at' => $now,
+        ':updated_at' => $now
+    ]);
+}
+function syncCollectItems(DOMDocument $dom): array
+{
+    $xpath = new DOMXPath($dom);
+    $items = [];
+
+    $nodes = $xpath->query(
+        '//*[local-name()="StockPosition"]'
+    );
+
+    if ($nodes instanceof DOMNodeList && $nodes->length > 0) {
+        foreach ($nodes as $node) {
+            if (!$node instanceof DOMElement) {
+                continue;
+            }
+
+            $product = syncFirst(
+                $xpath,
+                $node,
+                ['Product']
+            );
+
+            $producer = $product
+                ? syncFirst(
+                    $xpath,
+                    $product,
+                    ['Producer']
+                )
+                : null;
+
+            $item = [
+                'quantity' => syncNumber(
+                    syncValue(
+                        $xpath,
+                        $node,
+                        ['Quantity', 'amount']
+                    )
+                ),
+                'inform_f1_reg_id' => syncValue(
+                    $xpath,
+                    $node,
+                    ['InformF1RegId']
+                ),
+                'inform_f2_reg_id' => syncValue(
+                    $xpath,
+                    $node,
+                    ['InformF2RegId', 'Form2']
+                ),
+                'alc_percent' => syncNumber(
+                    syncValue(
+                        $xpath,
+                        $node,
+                        ['alcPercent']
+                    )
+                ),
+                'alc_percent_min' => syncNumber(
+                    syncValue(
+                        $xpath,
+                        $node,
+                        ['alcPercentMin']
+                    )
+                ),
+                'alc_percent_max' => syncNumber(
+                    syncValue(
+                        $xpath,
+                        $node,
+                        ['alcPercentMax']
+                    )
+                ),
+                'full_name' => $product
+                    ? syncValue(
+                        $xpath,
+                        $product,
+                        ['FullName']
+                    )
+                    : syncValue($xpath, $node, ['FullName']),
+                'alc_code' => $product
+                    ? syncValue(
+                        $xpath,
+                        $product,
+                        ['AlcCode']
+                    )
+                    : syncValue($xpath, $node, ['AlcCode']),
+                'capacity' => $product
+                    ? syncNumber(
+                        syncValue(
+                            $xpath,
+                            $product,
+                            ['Capacity']
+                        )
+                    )
+                    : null,
+                'unit_type' => $product
+                    ? syncValue(
+                        $xpath,
+                        $product,
+                        ['UnitType']
+                    )
+                    : null,
+                'alc_volume' => $product
+                    ? syncNumber(
+                        syncValue(
+                            $xpath,
+                            $product,
+                            ['AlcVolume']
+                        )
+                    )
+                    : null,
+                'product_v_code' => $product
+                    ? syncValue(
+                        $xpath,
+                        $product,
+                        ['ProductVCode']
+                    )
+                    : null,
+                'producer_client_reg_id' => $producer
+                    ? syncValue(
+                        $xpath,
+                        $producer,
+                        ['ClientRegId']
+                    )
+                    : null,
+                'producer_inn' => $producer
+                    ? syncValue(
+                        $xpath,
+                        $producer,
+                        ['INN']
+                    )
+                    : null,
+                'producer_kpp' => $producer
+                    ? syncValue(
+                        $xpath,
+                        $producer,
+                        ['KPP']
+                    )
+                    : null,
+                'producer_full_name' => $producer
+                    ? syncValue(
+                        $xpath,
+                        $producer,
+                        ['FullName']
+                    )
+                    : null,
+                'producer_short_name' => $producer
+                    ? syncValue(
+                        $xpath,
+                        $producer,
+                        ['ShortName']
+                    )
+                    : null,
+                'producer_country' => $producer
+                    ? syncValue(
+                        $xpath,
+                        $producer,
+                        ['Country']
+                    )
+                    : null,
+                'producer_region_code' => $producer
+                    ? syncValue(
+                        $xpath,
+                        $producer,
+                        ['RegionCode']
+                    )
+                    : null,
+                'producer_address' => $producer
+                    ? syncValue(
+                        $xpath,
+                        $producer,
+                        ['description']
+                    )
+                    : null,
+                'raw_xml' => $dom->saveXML($node)
+            ];
+
+            $items[] = $item;
+        }
+
+        return $items;
+    }
+
+    $positionNodes = $xpath->query(
+        '//*[local-name()="Position"]'
+    );
+
+    if ($positionNodes instanceof DOMNodeList) {
+        foreach ($positionNodes as $position) {
+            if (!$position instanceof DOMElement) {
+                continue;
+            }
+
+            $step = syncFirst(
+                $xpath,
+                $position,
+                ['step']
+            );
+
+            if (!$step) {
+                continue;
+            }
+
+            $items[] = [
+                'quantity' => syncNumber(
+                    syncValue(
+                        $xpath,
+                        $step,
+                        ['amount']
+                    )
+                ),
+                'inform_f1_reg_id' => null,
+                'inform_f2_reg_id' => syncValue(
+                    $xpath,
+                    $step,
+                    ['Form2']
+                ),
+                'alc_percent' => null,
+                'alc_percent_min' => null,
+                'alc_percent_max' => null,
+                'full_name' => null,
+                'alc_code' => null,
+                'capacity' => null,
+                'unit_type' => null,
+                'alc_volume' => null,
+                'product_v_code' => null,
+                'producer_client_reg_id' => syncValue(
+                    $xpath,
+                    $step,
+                    ['Shipper']
+                ),
+                'producer_inn' => null,
+                'producer_kpp' => null,
+                'producer_full_name' => null,
+                'producer_short_name' => null,
+                'producer_country' => null,
+                'producer_region_code' => null,
+                'producer_address' => null,
+                'raw_xml' => $dom->saveXML($position)
+            ];
+        }
+    }
+
+    return $items;
+}
+
+function syncParseDocument(
+    string $xml,
+    string $queueType,
+    int $queueId,
+    ?string $replyId
+): array {
+    libxml_use_internal_errors(true);
+
+    $dom = new DOMDocument();
+
+    if (!$dom->loadXML($xml)) {
+        $errors = [];
+
+        foreach (libxml_get_errors() as $error) {
+            $errors[] = trim($error->message);
+        }
+
+        libxml_clear_errors();
+
+        throw new RuntimeException(
+            'Invalid XML: ' . implode('; ', $errors)
+        );
+    }
+
+    libxml_clear_errors();
+
+    $xpath = new DOMXPath($dom);
+
+    $docNode = $xpath->query(
+        '/*[local-name()="Documents"]/*[local-name()="Document"]/*[1]'
+    );
+
+    if (
+        !$docNode instanceof DOMNodeList ||
+        $docNode->length === 0
+    ) {
+        throw new RuntimeException(
+            'Document node not found'
+        );
+    }
+
+    $businessNode = $docNode->item(0);
+
+    if (!$businessNode instanceof DOMElement) {
+        throw new RuntimeException(
+            'Invalid business document node'
+        );
+    }
+
+    $documentType = $queueType;
+
+    $typeFromXml = strtolower(
+        $businessNode->localName
+    );
+
+    if ($typeFromXml !== '') {
+        $documentType = $businessNode->localName;
+    }
+
+    $sender = syncValue(
+        $xpath,
+        $businessNode,
+        ['Shipper', 'Sender']
+    );
+
+    $receiver = syncValue(
+        $xpath,
+        $businessNode,
+        ['Consignee', 'Receiver']
+    );
+
+    $number = syncValue(
+        $xpath,
+        $businessNode,
+        ['NUMBER', 'WBNUMBER', 'RegID']
+    );
+
+    $documentDate = syncValue(
+        $xpath,
+        $businessNode,
+        ['Date', 'WBDate', 'TicketDate', 'RestsDate', 'EGAISFixDate']
+    );
+
+    $status = null;
+
+    $conclusion = syncValue(
+        $xpath,
+        $businessNode,
+        ['Conclusion']
+    );
+
+    if ($conclusion !== null) {
+        $status = $conclusion;
+    } elseif ($documentType === 'Ticket') {
+        $status = 'Received';
+    } else {
+        $status = 'Received';
+    }
+
+    $businessIdentity = syncValue(
+        $xpath,
+        $businessNode,
+        ['Identity', 'DocId', 'WBRegId', 'TransportId']
+    );
+
+    $externalId = implode(':', [
+        'queue',
+        $queueType,
+        (string)$queueId
+    ]);
+
+    if ($replyId !== null && $replyId !== '') {
+        $externalId .= ':' . $replyId;
+    }
+
+    $items = syncCollectItems($dom);
+
+    return [
+        'external_id' => $externalId,
+        'queue_type' => $queueType,
+        'queue_id' => $queueId,
+        'reply_id' => $replyId,
+        'document_type' => $documentType,
+        'direction' => 'outgoing',
+        'number' => $number,
+        'document_date' => $documentDate,
+        'sender' => $sender,
+        'receiver' => $receiver,
+        'status' => $status,
+        'identity' => $businessIdentity,
+        'items' => $items,
+        'dom' => $dom
+    ];
+}
+
+function syncParseQueue(string $xml): array
+{
+    libxml_use_internal_errors(true);
+
+    $dom = new DOMDocument();
+
+    if (!$dom->loadXML($xml)) {
+        throw new RuntimeException(
+            'Cannot parse /opt/out XML'
+        );
+    }
+
+    libxml_clear_errors();
+
+    $xpath = new DOMXPath($dom);
+    $result = [];
+
+    $nodes = $xpath->query(
+        '//*[local-name()="url"]'
+    );
+
+    if (!$nodes instanceof DOMNodeList) {
+        return [];
+    }
+
+    foreach ($nodes as $node) {
+        if (!$node instanceof DOMElement) {
+            continue;
+        }
+
+        $url = trim($node->textContent);
+
+        if ($url === '') {
+            continue;
+        }
+
+        $replyId = trim(
+            (string)$node->getAttribute('replyId')
+        );
+
+        if ($replyId === '') {
+            $replyId = null;
+        }
+
+        $path = parse_url(
+            $url,
+            PHP_URL_PATH
+        );
+
+        if (!is_string($path)) {
+            continue;
+        }
+
+        if (
+            !preg_match(
+                '#/opt/out/([^/]+)/(\d+)$#',
+                $path,
+                $m
+            )
+        ) {
+            continue;
+        }
+
+        $result[] = [
+            'type' => $m[1],
+            'id' => (int)$m[2],
+            'reply_id' => $replyId,
+            'url' => $url
+        ];
+    }
+
+    return $result;
+}
+
+function runSync(PDO $db, int $utmId): array
+{
+    $utm = syncGetUtm(
+        $db,
+        $utmId
+    );
+
+    if (!$utm) {
+        throw new RuntimeException(
+            'UTM not found: ' . $utmId
+        );
+    }
+
+    $ip = (string)$utm['ip'];
+    $port = (int)$utm['port'];
+
+    $base = 'http://' . $ip . ':' . $port;
+
+    $queue = syncHttpGet(
+        $base . '/opt/out',
+        20
+    );
+
+    if (!$queue['ok']) {
+        throw new RuntimeException(
+            'Cannot read /opt/out: ' .
+            ($queue['error'] ?? 'unknown error')
+        );
+    }
+
+    $entries = syncParseQueue(
+        (string)$queue['data']
+    );
+
+    $stats = [
+        'utm_id' => $utmId,
+        'utm_name' => $utm['name'] ?? null,
+        'queue_total' => count($entries),
+        'processed' => 0,
+        'created_or_updated' => 0,
+        'items' => 0,
+        'errors' => [],
+        'documents' => []
+    ];
+
+    foreach ($entries as $entry) {
+        try {
+            $response = syncHttpGet(
+                (string)$entry['url'],
+                20
+            );
+
+            if (!$response['ok']) {
+                throw new RuntimeException(
+                    'HTTP ' . $response['status']
+                );
+            }
+
+            $parsed = syncParseDocument(
+                (string)$response['data'],
+                (string)$entry['type'],
+                (int)$entry['id'],
+                $entry['reply_id']
+            );
+
+            $db->beginTransaction();
+
+            $documentId = syncDocumentUpsert(
+                $db,
+                $utmId,
+                $parsed,
+                (string)$response['data']
+            );
+
+            syncDeleteItems($db, (int)$documentDbId);
+
+            foreach ($parsed['items'] as $index => $item) {
+                syncSaveItem($db, (int)$documentDbId,
+                    $index + 1,
+                    $item
+                );
+            }
+
+            if (
+                in_array(
+                    'events',
+                    syncTables($db),
+                    true
+                )
+            ) {
+                $eventColumns = [];
+
+                $stmt = $db->query(
+                    'PRAGMA table_info(events)'
+                );
+
+                while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                    $eventColumns[] = $row['name'];
+                }
+
+                $eventData = [];
+
+                syncSetDocumentField(
+                    $eventData,
+                    $eventColumns,
+                    'utm_id',
+                    $utmId
+                );
+
+                syncSetDocumentField(
+                    $eventData,
+                    $eventColumns,
+                    'event_type',
+                    'document_sync'
+                );
+
+                syncSetDocumentField(
+                    $eventData,
+                    $eventColumns,
+                    'message',
+                    $entry['type'] .
+                    '/' .
+                    $entry['id']
+                );
+
+                syncSetDocumentField(
+                    $eventData,
+                    $eventColumns,
+                    'created_at',
+                    date('Y-m-d H:i:s')
+                );
+
+                syncInsertDynamic(
+                    $db,
+                    'events',
+                    $eventData
+                );
+            }
+
+            $db->commit();
+
+            $stats['processed']++;
+            $stats['created_or_updated']++;
+            $stats['items'] += count(
+                $parsed['items']
+            );
+
+            $stats['documents'][] = [
+                'id' => $documentId,
+                'type' => $parsed['document_type'],
+                'queue_type' => $entry['type'],
+                'queue_id' => $entry['id'],
+                'number' => $parsed['number'],
+                'date' => $parsed['document_date'],
+                'status' => $parsed['status'],
+                'items' => count($parsed['items'])
+            ];
+        } catch (Throwable $e) {
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            $stats['errors'][] = [
+                'type' => $entry['type'],
+                'id' => $entry['id'],
+                'error' => $e->getMessage()
+            ];
+        }
+    }
+
+    return $stats;
+}
+
+function outputSync(array $result): void
+{
+    echo json_encode(
+        [
+            'success' => count($result['errors']) === 0,
+            'data' => $result
+        ],
+        JSON_UNESCAPED_UNICODE |
+        JSON_UNESCAPED_SLASHES |
+        JSON_PRETTY_PRINT
+    );
+}
+
+$utmId = 1;
+
+if (PHP_SAPI === 'cli') {
+    global $argc, $argv;
+
+    foreach ($argv as $arg) {
+        if (preg_match('/^--utm=(\d+)$/', $arg, $m)) {
+            $utmId = (int)$m[1];
+        }
+    }
+
+    try {
+        $result = runSync($db, $utmId);
+        outputSync($result);
+    } catch (Throwable $e) {
+        echo json_encode(
+            [
+                'success' => false,
+                'error' => $e->getMessage()
+            ],
+            JSON_UNESCAPED_UNICODE |
+            JSON_UNESCAPED_SLASHES |
+            JSON_PRETTY_PRINT
+        );
+        exit(1);
+    }
+}

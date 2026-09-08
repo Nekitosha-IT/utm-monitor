@@ -1,0 +1,1799 @@
+<?php
+
+declare(strict_types=1);
+
+header('Content-Type: application/json; charset=utf-8');
+
+$config = require __DIR__ . '/config.php';
+
+$db = require __DIR__ . '/includes/database.php';
+require_once __DIR__ . '/includes/utm_repository.php';
+require_once __DIR__ . '/document_action.php';
+
+
+/* =========================================================
+   JSON RESPONSE
+   ========================================================= */
+
+function jsonResponse(array $data, int $status = 200): void
+{
+    http_response_code($status);
+
+    echo json_encode(
+        $data,
+        JSON_UNESCAPED_UNICODE |
+        JSON_UNESCAPED_SLASHES |
+        JSON_PRETTY_PRINT
+    );
+
+    exit;
+}
+
+
+/* =========================================================
+   HTTP REQUEST TO UTM
+   PHP 8.5 SAFE
+   ========================================================= */
+
+function requestUtm(
+    string $ip,
+    int $port,
+    string $path,
+    int $timeout = 5
+): array {
+
+    $url = 'http://' . $ip . ':' . $port . $path;
+
+    $start = microtime(true);
+
+    $context = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'timeout' => $timeout,
+            'ignore_errors' => true,
+            'protocol_version' => 1.1,
+            'header' =>
+                "Accept: application/json\r\n" .
+                "User-Agent: UTM-MONITOR/2.0\r\n" .
+                "Connection: close\r\n"
+        ]
+    ]);
+
+    /*
+     * PHP 8.5:
+     * Р СњР вЂў Р С‘РЎРѓР С—Р С•Р В»РЎРЉР В·РЎС“Р ВµР С $http_response_header.
+     */
+    $data = @file_get_contents(
+        $url,
+        false,
+        $context
+    );
+
+    $time = (int)round(
+        (microtime(true) - $start) * 1000
+    );
+
+    /*
+     * PHP 8.5 РЎвЂћРЎС“Р Р…Р С”РЎвЂ Р С‘РЎРЏ Р С—Р С•Р В»РЎС“РЎвЂЎР ВµР Р…Р С‘РЎРЏ Р С—Р С•РЎРѓР В»Р ВµР Т‘Р Р…Р С‘РЎвЂ¦ HTTP-Р В·Р В°Р С–Р С•Р В»Р С•Р Р†Р С”Р С•Р Р†.
+     */
+    $headers = [];
+
+    if (function_exists('http_get_last_response_headers')) {
+        $headers = http_get_last_response_headers();
+
+        if (!is_array($headers)) {
+            $headers = [];
+        }
+    }
+
+    $httpCode = null;
+
+    foreach ($headers as $header) {
+
+        if (
+            preg_match(
+                '/HTTP\/\d+(?:\.\d+)?\s+(\d+)/i',
+                $header,
+                $m
+            )
+        ) {
+            $httpCode = (int)$m[1];
+        }
+    }
+
+    if ($data === false) {
+
+        return [
+            'ok' => false,
+            'http_code' => $httpCode,
+            'time' => $time,
+            'data' => null,
+            'error' => 'Р СњР ВµРЎвЂљ РЎРѓР С•Р ВµР Т‘Р С‘Р Р…Р ВµР Р…Р С‘РЎРЏ РЎРѓ Р Р€Р СћР Сљ',
+            'url' => $url
+        ];
+    }
+
+    if (
+        $httpCode !== null &&
+        $httpCode >= 400
+    ) {
+
+        return [
+            'ok' => false,
+            'http_code' => $httpCode,
+            'time' => $time,
+            'data' => $data,
+            'error' =>
+                'Р Р€Р СћР Сљ Р Р†Р ВµРЎР‚Р Р…РЎС“Р В» HTTP ' . $httpCode,
+            'url' => $url
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'http_code' => $httpCode ?? 200,
+        'time' => $time,
+        'data' => $data,
+        'error' => null,
+        'url' => $url
+    ];
+}
+
+
+/* =========================================================
+   JSON DECODE
+   ========================================================= */
+
+function decodeJson($value): ?array
+{
+    if (
+        !is_string($value) ||
+        trim($value) === ''
+    ) {
+        return null;
+    }
+
+    $result = json_decode(
+        $value,
+        true
+    );
+
+    if (
+        json_last_error() !== JSON_ERROR_NONE
+    ) {
+        return null;
+    }
+
+    return is_array($result)
+        ? $result
+        : null;
+}
+
+
+/* =========================================================
+   DATE
+   ========================================================= */
+
+function parseUtmDate($value): ?DateTime
+{
+    if (
+        $value === null ||
+        $value === ''
+    ) {
+        return null;
+    }
+
+    $value = trim((string)$value);
+
+    $formats = [
+        'Y-m-d H:i:s O',
+        'Y-m-d H:i:s P',
+        'Y-m-d\TH:i:sO',
+        'Y-m-d\TH:i:sP',
+        'd.m.Y H:i:s O',
+        'd.m.Y H:i:sO',
+        DATE_ATOM
+    ];
+
+    foreach ($formats as $format) {
+
+        $date = DateTime::createFromFormat(
+            $format,
+            $value
+        );
+
+        if ($date instanceof DateTime) {
+            return $date;
+        }
+    }
+
+    $timestamp = strtotime($value);
+
+    if ($timestamp !== false) {
+
+        $date = new DateTime();
+
+        $date->setTimestamp(
+            $timestamp
+        );
+
+        return $date;
+    }
+
+    return null;
+}
+
+
+/* =========================================================
+   CERTIFICATE STATUS
+   ========================================================= */
+
+function certificateStatus(
+    ?array $certificate
+): ?array {
+
+    if (!is_array($certificate)) {
+        return null;
+    }
+
+    $expireValue =
+        $certificate['expireDate']
+        ?? $certificate['expire_date']
+        ?? $certificate['notAfter']
+        ?? null;
+
+    $date = parseUtmDate(
+        $expireValue
+    );
+
+    $validValue =
+        $certificate['isValid']
+        ?? $certificate['valid']
+        ?? null;
+
+    $isValid = null;
+
+    if ($validValue !== null) {
+
+        $value = strtolower(
+            trim((string)$validValue)
+        );
+
+        if (
+            $validValue === true ||
+            $value === 'true' ||
+            $value === 'valid'
+        ) {
+            $isValid = true;
+        }
+
+        if (
+            $validValue === false ||
+            $value === 'false' ||
+            $value === 'invalid'
+        ) {
+            $isValid = false;
+        }
+    }
+
+    if (!$date) {
+
+        return [
+            'status' => 'unknown',
+            'status_text' => 'РЎСЂРѕРє РЅРµРёР·РІРµСЃС‚РµРЅ',
+            'is_valid' => $isValid,
+            'expire_date' => null,
+            'days_left' => null,
+            'warning' =>
+                'Р Р€Р СћР Сљ Р Р…Р Вµ Р С—Р ВµРЎР‚Р ВµР Т‘Р В°Р В» Р Т‘Р В°РЎвЂљРЎС“ Р С•Р С”Р С•Р Р…РЎвЂЎР В°Р Р…Р С‘РЎРЏ'
+        ];
+    }
+
+    $now = new DateTime();
+
+    $seconds =
+        $date->getTimestamp() -
+        $now->getTimestamp();
+
+    $days =
+        (int)floor(
+            $seconds / 86400
+        );
+
+    if ($seconds < 0) {
+
+        return [
+            'status' => 'expired',
+            'status_text' => 'РРЎРўРЃРљ',
+            'is_valid' => false,
+            'expire_date' =>
+                $date->format('d.m.Y H:i:s'),
+            'days_left' => $days,
+            'warning' =>
+                'Р РЋР ВµРЎР‚РЎвЂљР С‘РЎвЂћР С‘Р С”Р В°РЎвЂљ Р С—РЎР‚Р С•РЎРѓРЎР‚Р С•РЎвЂЎР ВµР Р…'
+        ];
+    }
+
+    if ($isValid === false) {
+
+        return [
+            'status' => 'invalid',
+            'status_text' => 'Р СњР вЂўР вЂќР вЂўР в„ўР РЋР СћР вЂ™Р ВР СћР вЂўР вЂєР вЂўР Сњ',
+            'is_valid' => false,
+            'expire_date' =>
+                $date->format('d.m.Y H:i:s'),
+            'days_left' => $days,
+            'warning' =>
+                'Р РЋР ВµРЎР‚РЎвЂљР С‘РЎвЂћР С‘Р С”Р В°РЎвЂљ Р Р…Р ВµР Т‘Р ВµР в„–РЎРѓРЎвЂљР Р†Р С‘РЎвЂљР ВµР В»Р ВµР Р…'
+        ];
+    }
+
+    if ($days <= 7) {
+
+        return [
+            'status' => 'critical',
+            'status_text' => 'Р С™Р В Р ВР СћР ВР В§Р СњР С›',
+            'is_valid' => true,
+            'expire_date' =>
+                $date->format('d.m.Y H:i:s'),
+            'days_left' => $days,
+            'warning' =>
+                'Р вЂќР С• Р С•Р С”Р С•Р Р…РЎвЂЎР В°Р Р…Р С‘РЎРЏ РЎРѓР ВµРЎР‚РЎвЂљР С‘РЎвЂћР С‘Р С”Р В°РЎвЂљР В° 7 Р Т‘Р Р…Р ВµР в„– Р С‘Р В»Р С‘ Р СР ВµР Р…РЎРЉРЎв‚¬Р Вµ'
+        ];
+    }
+
+    if ($days <= 30) {
+
+        return [
+            'status' => 'warning',
+            'status_text' => 'Р вЂ™Р СњР ВР СљР С’Р СњР ВР вЂў',
+            'is_valid' => true,
+            'expire_date' =>
+                $date->format('d.m.Y H:i:s'),
+            'days_left' => $days,
+            'warning' =>
+                'Р вЂќР С• Р С•Р С”Р С•Р Р…РЎвЂЎР В°Р Р…Р С‘РЎРЏ РЎРѓР ВµРЎР‚РЎвЂљР С‘РЎвЂћР С‘Р С”Р В°РЎвЂљР В° 30 Р Т‘Р Р…Р ВµР в„– Р С‘Р В»Р С‘ Р СР ВµР Р…РЎРЉРЎв‚¬Р Вµ'
+        ];
+    }
+
+    return [
+        'status' => 'valid',
+        'status_text' => 'Р вЂќР вЂўР в„ўР РЋР СћР вЂ™Р ВР СћР вЂўР вЂєР вЂўР Сњ',
+        'is_valid' => true,
+        'expire_date' =>
+            $date->format('d.m.Y H:i:s'),
+        'days_left' => $days,
+        'warning' => null
+    ];
+}
+
+
+/* =========================================================
+   CERTIFICATE INFO
+   ========================================================= */
+
+function buildCertificateInfo(
+    $certificate
+): ?array {
+
+    if (!is_array($certificate)) {
+        return null;
+    }
+
+    $status =
+        certificateStatus($certificate);
+
+    return [
+        'cert_type' =>
+            $certificate['certType']
+            ?? $certificate['cert_type']
+            ?? null,
+
+        'issuer' =>
+            $certificate['issuer']
+            ?? null,
+
+        'start_date' =>
+            $certificate['startDate']
+            ?? $certificate['start_date']
+            ?? null,
+
+        'expire_date' =>
+            $status['expire_date']
+            ?? null,
+
+        'is_valid' =>
+            $status['is_valid']
+            ?? null,
+
+        'status' =>
+            $status['status']
+            ?? 'unknown',
+
+        'status_text' =>
+            $status['status_text']
+            ?? 'Р СњР ВµР С‘Р В·Р Р†Р ВµРЎРѓРЎвЂљР Р…Р С•',
+
+        'days_left' =>
+            $status['days_left']
+            ?? null,
+
+        'warning' =>
+            $status['warning']
+            ?? null
+    ];
+}
+
+
+/* =========================================================
+   CERTIFICATE LIST
+   ========================================================= */
+
+function getCertificateAliases(
+    string $ip,
+    int $port,
+    int $timeout
+): array {
+
+    $answer = requestUtm(
+        $ip,
+        $port,
+        '/api/certificate/list',
+        $timeout
+    );
+
+    if (!$answer['ok']) {
+
+        return [
+            'ok' => false,
+            'rsa' => [],
+            'gost' => [],
+            'raw' => null,
+            'error' => $answer['error']
+        ];
+    }
+
+    $json =
+        decodeJson($answer['data']);
+
+    if (
+        isset($json['value']) &&
+        is_array($json['value'])
+    ) {
+        $json = $json['value'];
+    }
+
+    $rsa = [];
+    $gost = [];
+
+    if (is_array($json)) {
+
+        foreach ($json as $item) {
+
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $algorithm =
+                strtoupper(
+                    trim(
+                        (string)(
+                            $item['algorithm']
+                            ?? $item['type']
+                            ?? $item['certType']
+                            ?? ''
+                        )
+                    )
+                );
+
+            $aliases =
+                $item['aliasesList']
+                ?? $item['aliases']
+                ?? [];
+
+            if (!is_array($aliases)) {
+
+                $aliases =
+                    $aliases !== ''
+                    ? [(string)$aliases]
+                    : [];
+            }
+
+            foreach ($aliases as $alias) {
+
+                $alias = trim(
+                    (string)$alias
+                );
+
+                if ($alias === '') {
+                    continue;
+                }
+
+                if (
+                    strpos($algorithm, 'RSA') !== false
+                ) {
+                    $rsa[] = $alias;
+                }
+
+                if (
+                    strpos($algorithm, 'GOST') !== false
+                ) {
+                    $gost[] = $alias;
+                }
+            }
+        }
+    }
+
+    return [
+        'ok' => true,
+        'rsa' => array_values(
+            array_unique($rsa)
+        ),
+        'gost' => array_values(
+            array_unique($gost)
+        ),
+        'raw' => $json,
+        'error' => null
+    ];
+}
+
+
+/* =========================================================
+   UTM INFO
+   ========================================================= */
+
+function getUtmInfo(
+    string $ip,
+    int $port,
+    int $timeout
+): array {
+
+    return requestUtm(
+        $ip,
+        $port,
+        '/api/info/list',
+        $timeout
+    );
+}
+
+
+/* =========================================================
+   DOCUMENTS SUMMARY
+   ========================================================= */
+
+function getDocumentsSummary(
+    string $ip,
+    int $port,
+    int $timeout
+): array {
+
+    $result = [
+        'incoming' => null,
+        'outgoing' => null
+    ];
+
+    $incoming = requestUtm(
+        $ip,
+        $port,
+        '/api/db/in/list?limit=1&offset=0',
+        $timeout
+    );
+
+    if ($incoming['ok']) {
+
+        $json =
+            decodeJson($incoming['data']);
+
+        if (is_array($json)) {
+
+            $result['incoming'] =
+                $json['total']
+                ?? $json['count']
+                ?? null;
+        }
+    }
+
+    $outgoing = requestUtm(
+        $ip,
+        $port,
+        '/api/db/out/list?limit=1&offset=0',
+        $timeout
+    );
+
+    if ($outgoing['ok']) {
+
+        $json =
+            decodeJson($outgoing['data']);
+
+        if (is_array($json)) {
+
+            $result['outgoing'] =
+                $json['total']
+                ?? $json['count']
+                ?? null;
+        }
+    }
+
+    return $result;
+}
+
+
+/* =========================================================
+   UTM STATUS
+   ========================================================= */
+
+function buildUtmStatus(
+    $id,
+    array $utm,
+    int $timeout
+): array {
+
+    $ip =
+        trim(
+            (string)($utm['ip'] ?? '')
+        );
+
+    $port =
+        (int)($utm['port'] ?? 8086);
+
+    if ($ip === '') {
+
+        return [
+            'id' => (int)$utm['id'],
+            'name' =>
+                $utm['name']
+                ?? ('Р Р€Р СћР Сљ РІвЂћвЂ“' . $id),
+            'ip' => '',
+            'port' => $port,
+            'online' => false,
+            'response_time' => 0,
+            'http_code' => null,
+            'error' => 'Р С’Р Т‘РЎР‚Р ВµРЎРѓ Р Р€Р СћР Сљ Р Р…Р Вµ РЎС“Р С”Р В°Р В·Р В°Р Р…',
+            'version' => null,
+            'contour' => null,
+            'owner_id' => null,
+            'license' => null,
+            'db' => [
+                'create_date' => null,
+                'owner_id' => null
+            ],
+            'rsa' => 0,
+            'gost' => 0,
+            'rsa_aliases' => [],
+            'gost_aliases' => [],
+            'rsa_info' => null,
+            'gost_info' => null,
+            'documents' => [
+                'incoming' => null,
+                'outgoing' => null
+            ],
+            'certificates' => [
+                'rsa' => [],
+                'gost' => []
+            ],
+            'warnings' => []
+        ];
+    }
+
+    $info =
+        getUtmInfo(
+            $ip,
+            $port,
+            $timeout
+        );
+
+    $online =
+        $info['ok'];
+
+    $infoData = [];
+
+    if ($info['ok']) {
+
+        $decoded =
+            decodeJson(
+                $info['data']
+            );
+
+        if (is_array($decoded)) {
+            $infoData = $decoded;
+        }
+    }
+
+    $aliases =
+        getCertificateAliases(
+            $ip,
+            $port,
+            $timeout
+        );
+
+    $rsaInfo =
+        buildCertificateInfo(
+            $infoData['rsa']
+            ?? null
+        );
+
+    $gostInfo =
+        buildCertificateInfo(
+            $infoData['gost']
+            ?? null
+        );
+
+    $documents =
+        getDocumentsSummary(
+            $ip,
+            $port,
+            $timeout
+        );
+
+    $warnings = [];
+
+    if (!$online) {
+
+        $warnings[] = [
+            'type' => 'utm',
+            'level' => 'critical',
+            'message' =>
+                $info['error']
+                ?? 'Р Р€Р СћР Сљ Р Р…Р ВµР Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р ВµР Р…'
+        ];
+    }
+
+    if (
+        is_array($rsaInfo) &&
+        !empty($rsaInfo['warning'])
+    ) {
+
+        $warnings[] = [
+            'type' => 'rsa',
+            'level' =>
+                $rsaInfo['status'],
+            'message' =>
+                $rsaInfo['warning']
+        ];
+    }
+
+    if (
+        is_array($gostInfo) &&
+        !empty($gostInfo['warning'])
+    ) {
+
+        $warnings[] = [
+            'type' => 'gost',
+            'level' =>
+                $gostInfo['status'],
+            'message' =>
+                $gostInfo['warning']
+        ];
+    }
+
+    if (
+        array_key_exists(
+            'license',
+            $infoData
+        ) &&
+        $infoData['license'] === false
+    ) {
+
+        $warnings[] = [
+            'type' => 'license',
+            'level' => 'critical',
+            'message' =>
+                'Р вЂєР С‘РЎвЂ Р ВµР Р…Р В·Р С‘РЎРЏ Р Р€Р СћР Сљ Р Р…Р ВµР Т‘Р ВµР в„–РЎРѓРЎвЂљР Р†Р С‘РЎвЂљР ВµР В»РЎРЉР Р…Р В°'
+        ];
+    }
+
+    return [
+        'id' => (int)$utm['id'],
+
+        'name' =>
+            $utm['name']
+            ?? ('Р Р€Р СћР Сљ РІвЂћвЂ“' . $id),
+
+        'ip' => $ip,
+
+        'port' => $port,
+
+        'online' => $online,
+
+        'response_time' =>
+            $info['time'],
+
+        'http_code' =>
+            $info['http_code'],
+
+        'error' =>
+            $info['error'],
+
+        'version' =>
+            $infoData['version']
+            ?? $infoData['utmVersion']
+            ?? null,
+
+        'contour' =>
+            $infoData['contour']
+            ?? null,
+
+        'owner_id' =>
+            $infoData['ownerId']
+            ?? $infoData['ownerID']
+            ?? null,
+
+        'license' =>
+            $infoData['license']
+            ?? null,
+
+        'db' => [
+            'create_date' =>
+                $infoData['db']['createDate']
+                ?? null,
+
+            'owner_id' =>
+                $infoData['db']['ownerId']
+                ?? null
+        ],
+
+        'rsa' =>
+            count($aliases['rsa']),
+
+        'gost' =>
+            count($aliases['gost']),
+
+        'rsa_aliases' =>
+            $aliases['rsa'],
+
+        'gost_aliases' =>
+            $aliases['gost'],
+
+        'rsa_info' =>
+            $rsaInfo,
+
+        'gost_info' =>
+            $gostInfo,
+
+        'documents' =>
+            $documents,
+
+        'certificates' => [
+            'rsa' =>
+                $aliases['rsa'],
+
+            'gost' =>
+                $aliases['gost']
+        ],
+
+        'warnings' =>
+            $warnings
+    ];
+}
+
+
+/* =========================================================
+   TIMEOUT
+   ========================================================= */
+
+function getTimeout(): int
+{
+    global $config;
+
+    return max(
+        1,
+        (int)(
+            $config['timeout']
+            ?? 5
+        )
+    );
+}
+
+
+/* =========================================================
+   STATUS
+   ========================================================= */
+
+function requireUtm(int $id): array
+{
+    global $db;
+
+    if ($id <= 0) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Рµ СѓРєР°Р·Р°РЅ ID Рў'
+        ], 400);
+    }
+
+    $utm = getUtm($db, $id);
+
+    if ($utm === null) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Рў РЅРµ РЅР°Р№РґРµРЅ',
+            'id' => $id
+        ], 404);
+    }
+
+    return $utm;
+}
+function actionStatus(): void
+{
+    global $db;
+
+    $result = [];
+
+    $timeout =
+        getTimeout();
+
+    $utms = getAllUtms($db);
+
+    foreach ($utms as $utm) {
+
+        if (
+            empty($utm['enabled']) ||
+            empty($utm['ip'])
+        ) {
+            continue;
+        }
+
+        try {
+
+            $result[] =
+                buildUtmStatus(
+                    (int)$utm['id'],
+                    $utm,
+                    $timeout
+                );
+
+        } catch (Throwable $e) {
+
+            $result[] = [
+                'id' => (int)$utm['id'],
+                'name' =>
+                    $utm['name']
+                    ?? ('Р Р€Р СћР Сљ РІвЂћвЂ“' . $id),
+                'ip' =>
+                    $utm['ip'],
+                'port' =>
+                    $utm['port']
+                    ?? 8086,
+                'online' => false,
+                'response_time' => 0,
+                'http_code' => null,
+                'error' =>
+                    'Р С›РЎв‚¬Р С‘Р В±Р С”Р В° Р СР С•Р Р…Р С‘РЎвЂљР С•РЎР‚Р С‘Р Р…Р С–Р В°: ' .
+                    $e->getMessage(),
+                'warnings' => [
+                    [
+                        'type' => 'monitor',
+                        'level' => 'critical',
+                        'message' =>
+                            $e->getMessage()
+                    ]
+                ]
+            ];
+        }
+    }
+
+    jsonResponse([
+        'success' => true,
+        'utms' => $result,
+        'server_time' =>
+            date('d.m.Y H:i:s')
+    ]);
+}
+
+
+/* =========================================================
+   CERTIFICATES
+   ========================================================= */
+
+function actionCertificates(): void
+{
+    global $db;
+
+    $id =
+        (int)($_GET['id'] ?? 0);
+$utm =
+        requireUtm($id);
+
+    $timeout =
+        getTimeout();
+
+    $info =
+        getUtmInfo(
+            $utm['ip'],
+            (int)$utm['port'],
+            $timeout
+        );
+
+    $aliases =
+        getCertificateAliases(
+            $utm['ip'],
+            (int)$utm['port'],
+            $timeout
+        );
+
+    $infoData = [];
+
+    if ($info['ok']) {
+
+        $decoded =
+            decodeJson(
+                $info['data']
+            );
+
+        if (is_array($decoded)) {
+            $infoData = $decoded;
+        }
+    }
+
+    jsonResponse([
+        'success' => true,
+
+        'utm' => [
+            'id' => (int)$utm['id'],
+            'name' =>
+                $utm['name'],
+            'ip' =>
+                $utm['ip'],
+            'port' =>
+                $utm['port']
+        ],
+
+        'rsa' => [
+            'aliases' =>
+                $aliases['rsa'],
+            'info' =>
+                buildCertificateInfo(
+                    $infoData['rsa']
+                    ?? null
+                )
+        ],
+
+        'gost' => [
+            'aliases' =>
+                $aliases['gost'],
+            'info' =>
+                buildCertificateInfo(
+                    $infoData['gost']
+                    ?? null
+                )
+        ]
+    ]);
+}
+
+
+/* =========================================================
+   INFO
+   ========================================================= */
+
+function actionInfo(): void
+{
+    global $db;
+
+    $id =
+        (int)($_GET['id'] ?? 0);
+$utm =
+        requireUtm($id);
+
+    $answer =
+        getUtmInfo(
+            $utm['ip'],
+            (int)$utm['port'],
+            getTimeout()
+        );
+
+    if (!$answer['ok']) {
+
+        jsonResponse([
+            'success' => false,
+            'error' =>
+                $answer['error'],
+            'http_code' =>
+                $answer['http_code'],
+            'utm_response' =>
+                $answer['data']
+        ], 502);
+    }
+
+    $data =
+        decodeJson(
+            $answer['data']
+        );
+
+    if ($data === null) {
+
+        jsonResponse([
+            'success' => false,
+            'error' =>
+                'Р Р€Р СћР Сљ Р Р†Р ВµРЎР‚Р Р…РЎС“Р В» Р Р…Р ВµР С”Р С•РЎР‚РЎР‚Р ВµР С”РЎвЂљР Р…РЎвЂ№Р в„– JSON',
+            'raw' =>
+                $answer['data']
+        ], 502);
+    }
+
+    jsonResponse([
+        'success' => true,
+        'data' => $data,
+        'response_time' =>
+            $answer['time']
+    ]);
+}
+
+
+/* =========================================================
+   MARK CODE VALIDATION
+   ========================================================= */
+
+function validateMarkCode(string $code): array
+{
+    $code = trim($code);
+
+    $length =
+        strlen($code);
+
+    if ($length !== 68 && $length !== 150) {
+
+        return [
+            'valid' => false,
+            'length' => $length,
+            'error' =>
+                'Р С™Р С•Р Т‘ Р СР В°РЎР‚Р С”Р С‘ Р Т‘Р С•Р В»Р В¶Р ВµР Р… РЎРѓР С•Р Т‘Р ВµРЎР‚Р В¶Р В°РЎвЂљРЎРЉ 68 Р С‘Р В»Р С‘ 150 РЎРѓР С‘Р СР Р†Р С•Р В»Р С•Р Р†'
+        ];
+    }
+
+    /*
+     * Р вЂ™ DataMatrix Р СР С•Р С–РЎС“РЎвЂљ Р Р†РЎРѓРЎвЂљРЎР‚Р ВµРЎвЂЎР В°РЎвЂљРЎРЉРЎРѓРЎРЏ РЎРѓР С—Р ВµРЎвЂ Р С‘Р В°Р В»РЎРЉР Р…РЎвЂ№Р Вµ
+     * РЎРѓР С‘Р СР Р†Р С•Р В»РЎвЂ№ GS/FNC1, Р С—Р С•РЎРЊРЎвЂљР С•Р СРЎС“ Р В·Р Т‘Р ВµРЎРѓРЎРЉ Р СњР вЂў Р В·Р В°Р С—РЎР‚Р ВµРЎвЂ°Р В°Р ВµР С
+     * Р С—РЎР‚Р С•Р С‘Р В·Р Р†Р С•Р В»РЎРЉР Р…РЎвЂ№Р Вµ РЎРѓР С‘Р СР Р†Р С•Р В»РЎвЂ№.
+     */
+
+    return [
+        'valid' => true,
+        'length' => $length,
+        'error' => null
+    ];
+}
+
+
+/* =========================================================
+   MARK CHECK
+   ========================================================= */
+
+function actionMarkCheck(): void
+{
+    global $db;
+
+    $id =
+        (int)($_GET['id'] ?? 0);
+
+    $code =
+        trim(
+            (string)($_GET['code'] ?? '')
+        );
+if ($code === '') {
+
+        jsonResponse([
+            'success' => false,
+            'error' =>
+                'Р СњР Вµ РЎС“Р С”Р В°Р В·Р В°Р Р… Р С”Р С•Р Т‘ Р СР В°РЎР‚Р С”Р С‘'
+        ], 400);
+    }
+
+    $validation =
+        validateMarkCode($code);
+
+    if (!$validation['valid']) {
+
+        jsonResponse([
+            'success' => false,
+            'error' =>
+                $validation['error'],
+            'code_length' =>
+                $validation['length'],
+            'allowed_lengths' => [
+                68,
+                150
+            ]
+        ], 400);
+    }
+
+    $utm =
+        requireUtm($id);
+
+    $ip =
+        trim(
+            (string)$utm['ip']
+        );
+
+    $port =
+        (int)$utm['port'];
+
+    /*
+     * Р РЋР Р…Р В°РЎвЂЎР В°Р В»Р В° РЎС“Р В±Р ВµР В¶Р Т‘Р В°Р ВµР СРЎРѓРЎРЏ, РЎвЂЎРЎвЂљР С• РЎРѓР В°Р С Р Р€Р СћР Сљ Р В¶Р С‘Р Р†.
+     */
+    $info =
+        getUtmInfo(
+            $ip,
+            $port,
+            max(5, getTimeout())
+        );
+
+    if (!$info['ok']) {
+
+        jsonResponse([
+            'success' => false,
+            'stage' => 'utm',
+            'error' =>
+                'Р РЋР В°Р С Р Р€Р СћР Сљ Р Р…Р ВµР Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р ВµР Р…',
+            'utm_ip' => $ip,
+            'utm_port' => $port,
+            'http_code' =>
+                $info['http_code'],
+            'utm_response' =>
+                $info['data'],
+            'response_time' =>
+                $info['time']
+        ], 502);
+    }
+
+    /*
+     * Р СџР С•Р В»РЎС“РЎвЂЎР В°Р ВµР С Р С‘Р Р…РЎвЂћР С•РЎР‚Р СР В°РЎвЂ Р С‘РЎР‹ Р С• РЎРѓР ВµРЎР‚РЎвЂљР С‘РЎвЂћР С‘Р С”Р В°РЎвЂљР В°РЎвЂ¦.
+     */
+    $aliases =
+        getCertificateAliases(
+            $ip,
+            $port,
+            max(5, getTimeout())
+        );
+
+    /*
+     * Р С›РЎвЂљР С—РЎР‚Р В°Р Р†Р В»РЎРЏР ВµР С Р В·Р В°Р С—РЎР‚Р С•РЎРѓ Р С‘Р СР ВµР Р…Р Р…Р С• Р Р€Р СћР Сљ.
+     */
+    $answer =
+        requestUtm(
+            $ip,
+            $port,
+            '/api/mark/check?code=' .
+            rawurlencode($code),
+            15
+        );
+
+    if (!$answer['ok']) {
+
+        $utmError =
+            trim(
+                (string)(
+                    $answer['data']
+                    ?? ''
+                )
+            );
+
+        /*
+         * Р С›РЎРѓР С•Р В±РЎвЂ№Р в„– РЎРѓР В»РЎС“РЎвЂЎР В°Р в„–, Р С”Р С•РЎвЂљР С•РЎР‚РЎвЂ№Р в„– РЎРѓР ВµР в„–РЎвЂЎР В°РЎРѓ Р Р†Р С‘Р Т‘Р С‘Р С
+         * РЎС“ РЎвЂљР Р†Р С•Р ВµР С–Р С• Р Р€Р СћР Сљ:
+         *
+         * filter-utm.egais.ru:8443 failed to respond
+         */
+        $filterProblem =
+            stripos(
+                $utmError,
+                'filter-utm.egais.ru'
+            ) !== false;
+
+        $diagnostics = [
+            'utm_online' => true,
+
+            'utm_ip' => $ip,
+
+            'utm_port' => $port,
+
+            'utm_http_code' =>
+                $answer['http_code'],
+
+            'utm_response_time' =>
+                $answer['time'],
+
+            'rsa_aliases' =>
+                $aliases['rsa'],
+
+            'gost_aliases' =>
+                $aliases['gost'],
+
+            'filter_error' =>
+                $filterProblem,
+
+            'message' =>
+                $filterProblem
+                ? 'Р Р€Р СћР Сљ Р Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р ВµР Р…, Р Р…Р С• Р С—РЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р В° Р СР В°РЎР‚Р С”Р С‘ Р Р…Р Вµ Р СР С•Р В¶Р ВµРЎвЂљ Р С—Р С•Р В»РЎС“РЎвЂЎР С‘РЎвЂљРЎРЉ Р С•РЎвЂљР Р†Р ВµРЎвЂљ Р С•РЎвЂљ РЎРѓР ВµРЎР‚Р Р†Р ВµРЎР‚Р В° Р вЂўР вЂњР С’Р ВР РЋ filter-utm.egais.ru:8443'
+                : 'Р Р€Р СћР Сљ Р Р†Р ВµРЎР‚Р Р…РЎС“Р В» Р С•РЎв‚¬Р С‘Р В±Р С”РЎС“ Р С—РЎР‚Р С‘ Р С—РЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р Вµ Р СР В°РЎР‚Р С”Р С‘'
+        ];
+
+        jsonResponse([
+            'success' => false,
+
+            'stage' => 'utm_mark_check',
+
+            'error' =>
+                $filterProblem
+                ? 'Р С›РЎв‚¬Р С‘Р В±Р С”Р В° РЎРѓР Р†РЎРЏР В·Р С‘ Р Р€Р СћР Сљ РЎРѓ РЎРѓР ВµРЎР‚Р Р†Р ВµРЎР‚Р С•Р С Р С—РЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р С‘ Р вЂўР вЂњР С’Р ВР РЋ'
+                : $answer['error'],
+
+            'code_length' =>
+                $validation['length'],
+
+            'utm' => $diagnostics,
+
+            'http_code' =>
+                $answer['http_code'],
+
+            'utm_response' =>
+                $utmError,
+
+            'response_time' =>
+                $answer['time']
+        ], 502);
+    }
+
+    $data =
+        decodeJson(
+            $answer['data']
+        );
+
+    jsonResponse([
+        'success' => true,
+
+        'stage' => 'utm_mark_check',
+
+        'code' => $code,
+
+        'code_length' =>
+            $validation['length'],
+
+        'result' =>
+            $data !== null
+            ? $data
+            : $answer['data'],
+
+        'response_time' =>
+            $answer['time']
+    ]);
+}
+
+
+/* =========================================================
+   DOCUMENT LIST
+   ========================================================= */
+
+function actionDocuments(
+    string $direction
+): void {
+
+    global $db;
+
+    $id =
+        (int)($_GET['id'] ?? 0);
+
+    $limit =
+        (int)($_GET['limit'] ?? 50);
+
+    $offset =
+        (int)($_GET['offset'] ?? 0);
+
+    $limit =
+        max(
+            1,
+            min(500, $limit)
+        );
+
+    $offset =
+        max(
+            0,
+            $offset
+        );
+$utm =
+        requireUtm($id);
+
+    $path =
+        $direction === 'in'
+        ? '/api/db/in/list?limit=' .
+          $limit .
+          '&offset=' .
+          $offset
+        : '/api/db/out/list?limit=' .
+          $limit .
+          '&offset=' .
+          $offset;
+
+    $answer =
+        requestUtm(
+            $utm['ip'],
+            (int)$utm['port'],
+            $path,
+            10
+        );
+
+    if (!$answer['ok']) {
+
+        jsonResponse([
+            'success' => false,
+            'error' =>
+                $answer['error'],
+            'http_code' =>
+                $answer['http_code'],
+            'utm_response' =>
+                $answer['data']
+        ], 502);
+    }
+
+    jsonResponse([
+        'success' => true,
+        'data' =>
+            decodeJson(
+                $answer['data']
+            )
+    ]);
+}
+
+
+/* =========================================================
+   TTN
+   ========================================================= */
+
+function actionTtn(): void
+{
+    global $db;
+
+    $id =
+        (int)($_GET['id'] ?? 0);
+
+    $limit =
+        (int)($_GET['limit'] ?? 50);
+
+    $offset =
+        (int)($_GET['offset'] ?? 0);
+
+    $limit =
+        max(
+            1,
+            min(500, $limit)
+        );
+
+    $offset =
+        max(
+            0,
+            $offset
+        );
+$utm =
+        requireUtm($id);
+
+    $answer =
+        requestUtm(
+            $utm['ip'],
+            (int)$utm['port'],
+            '/opt/out?limit=' .
+            $limit .
+            '&offset=' .
+            $offset,
+            10
+        );
+
+    if (!$answer['ok']) {
+
+        jsonResponse([
+            'success' => false,
+            'error' =>
+                $answer['error'],
+            'http_code' =>
+                $answer['http_code'],
+            'utm_response' =>
+                $answer['data']
+        ], 502);
+    }
+
+    jsonResponse([
+        'success' => true,
+        'data' =>
+            decodeJson(
+                $answer['data']
+            )
+            ?? $answer['data']
+    ]);
+}
+
+
+/* =========================================================
+   DIAGNOSTICS
+   ========================================================= */
+
+function actionDiagnostics(): void
+{
+    global $db;
+
+    $id =
+        (int)($_GET['id'] ?? 0);
+$utm =
+        requireUtm($id);
+
+    $ip =
+        trim(
+            (string)$utm['ip']
+        );
+
+    $port =
+        (int)$utm['port'];
+
+    $info =
+        getUtmInfo(
+            $ip,
+            $port,
+            5
+        );
+
+    $certificates =
+        getCertificateAliases(
+            $ip,
+            $port,
+            5
+        );
+
+    jsonResponse([
+        'success' => true,
+
+        'utm' => [
+            'id' => (int)$utm['id'],
+            'name' =>
+                $utm['name']
+                ?? null,
+            'ip' => $ip,
+            'port' => $port
+        ],
+
+        'info' => [
+            'ok' =>
+                $info['ok'],
+            'http_code' =>
+                $info['http_code'],
+            'response_time' =>
+                $info['time'],
+            'data' =>
+                $info['ok']
+                ? decodeJson($info['data'])
+                : null,
+            'error' =>
+                $info['error']
+        ],
+
+        'certificates' => [
+            'ok' =>
+                $certificates['ok'],
+            'rsa' =>
+                $certificates['rsa'],
+            'gost' =>
+                $certificates['gost'],
+            'error' =>
+                $certificates['error']
+        ],
+
+        'mark_check' => [
+            'endpoint' =>
+                '/api/mark/check',
+            'note' =>
+                'Р вЂ”Р В°Р С—РЎР‚Р С•РЎРѓ Р Р†РЎвЂ№Р С—Р С•Р В»Р Р…РЎРЏР ВµРЎвЂљРЎРѓРЎРЏ РЎРѓР В°Р СР С‘Р С Р Р€Р СћР Сљ. PHP Р Р…Р Вµ Р С—Р С•Р Т‘Р СР ВµР Р…РЎРЏР ВµРЎвЂљ РЎРѓР ВµРЎР‚РЎвЂљР С‘РЎвЂћР С‘Р С”Р В°РЎвЂљ Р Р€Р СћР Сљ.'
+        ]
+    ]);
+}
+
+
+/* =========================================================
+   SQLITE UTM LIST
+   ========================================================= */
+
+function actionUtms(): void
+{
+    global $db;
+
+    $utms = getAllUtms($db);
+
+    jsonResponse([
+        'success' => true,
+        'utms' => $utms,
+        'count' => count($utms)
+    ]);
+}
+
+
+/* =========================================================
+   UTM CRUD
+   ========================================================= */
+
+function actionAddUtm(): void
+{
+    global $db;
+
+    $input = json_decode(
+        file_get_contents('php://input'),
+        true
+    );
+
+    if (!is_array($input)) {
+        $input = $_POST;
+    }
+
+    $name = trim((string)($input['name'] ?? ''));
+    $ip = trim((string)($input['ip'] ?? ''));
+    $port = (int)($input['port'] ?? 0);
+    $externalId = trim((string)($input['external_id'] ?? ''));
+
+    if ($externalId === '') {
+        $externalId = null;
+    }
+
+    $id = addUtm(
+        $db,
+        $name,
+        $ip,
+        $port,
+        $externalId
+    );
+
+    jsonResponse([
+        'success' => true,
+        'message' => 'РЈРўРњ РґРѕР±Р°РІР»РµРЅ',
+        'id' => $id
+    ]);
+}
+
+
+function actionUpdateUtm(): void
+{
+    global $db;
+
+    $input = json_decode(
+        file_get_contents('php://input'),
+        true
+    );
+
+    if (!is_array($input)) {
+        $input = $_POST;
+    }
+
+    $id = (int)($input['id'] ?? 0);
+    $name = trim((string)($input['name'] ?? ''));
+    $ip = trim((string)($input['ip'] ?? ''));
+    $port = (int)($input['port'] ?? 0);
+
+    $updated = updateUtm(
+        $db,
+        $id,
+        $name,
+        $ip,
+        $port
+    );
+
+    jsonResponse([
+        'success' => true,
+        'updated' => $updated
+    ]);
+}
+
+
+function actionDeleteUtm(): void
+{
+    global $db;
+
+    $input = json_decode(
+        file_get_contents('php://input'),
+        true
+    );
+
+    if (!is_array($input)) {
+        $input = $_POST;
+    }
+
+    $id = (int)($input['id'] ?? ($_GET['id'] ?? 0));
+
+    $deleted = deleteUtm($db, $id);
+
+    jsonResponse([
+        'success' => true,
+        'deleted' => $deleted
+    ]);
+}
+
+/* =========================================================
+   MAIN
+   ========================================================= */
+
+$action =
+    $_GET['action'] ?? '';
+
+try {
+
+    switch ($action) {
+
+        case 'utms':
+            actionUtms();
+            break;
+
+        case 'add_utm':
+            actionAddUtm();
+            break;
+
+        case 'update_utm':
+            actionUpdateUtm();
+            break;
+
+        case 'delete_utm':
+            actionDeleteUtm();
+            break;
+
+        case 'status':
+            actionStatus();
+            break;
+
+        case 'certificates':
+            actionCertificates();
+            break;
+
+        case 'info':
+            actionInfo();
+            break;
+
+        case 'mark_check':
+            actionMarkCheck();
+            break;
+
+        case 'incoming':
+            actionDocuments('in');
+            break;
+
+        case 'outgoing':
+            actionDocuments('out');
+            break;
+
+        case 'ttn':
+            actionTtn();
+            break;
+
+        case 'diagnostics':
+            actionDiagnostics();
+            break;
+
+        
+case 'documents':
+    actionDocumentsList($db);
+    break;
+case 'document':
+
+            actionDocument($db);
+
+            break;
+
+        default:
+
+            jsonResponse([
+                'success' => false,
+                'error' =>
+                    'Р СњР ВµР С‘Р В·Р Р†Р ВµРЎРѓРЎвЂљР Р…Р В°РЎРЏ Р С”Р С•Р СР В°Р Р…Р Т‘Р В°',
+                'available_actions' => [
+                    'status',
+                    'certificates',
+                    'info',
+                    'mark_check',
+                    'incoming',
+                    'outgoing',
+                    'ttn',
+                    'diagnostics'
+                ],
+                'action' =>
+                    $action
+            ], 400);
+    }
+
+} catch (Throwable $e) {
+
+    jsonResponse([
+        'success' => false,
+        'error' =>
+            'Р С›РЎв‚¬Р С‘Р В±Р С”Р В° API: ' .
+            $e->getMessage()
+    ], 500);
+}

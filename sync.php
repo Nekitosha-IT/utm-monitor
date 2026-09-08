@@ -1,0 +1,1951 @@
+<?php
+declare(strict_types=1);
+
+/**
+ * Синхронизация УТМ -> SQLite
+ *
+ * Получает:
+ *   /api/db/in/list
+ *   /api/db/out/list
+ *   /opt/out
+ *
+ * Затем скачивает реальные XML:
+ *   /opt/out/Ticket/{id}
+ *   /opt/out/ReplyRests_v3/{id}
+ *   /opt/out/ReplyRestsShop_v2/{id}
+ *   /opt/out/WayBill_v4/{id}
+ *   /opt/out/TTNHISTORYF2REG/{id}
+ *   /opt/out/FORM2REGINFO/{id}
+ */
+
+
+/**
+ * ============================================================
+ * HTTP GET
+ * ============================================================
+ */
+function syncHttpGet(
+    string $ip,
+    int $port,
+    string $path,
+    int $timeout = 15
+): array {
+    $url = 'http://' . $ip . ':' . $port . $path;
+
+    $context = stream_context_create([
+        'http' => [
+            'method' => 'GET',
+            'timeout' => $timeout,
+            'ignore_errors' => true,
+            'protocol_version' => 1.1,
+            'header' =>
+                "Accept: */*\r\n" .
+                "User-Agent: UTM-MONITOR/2.0\r\n" .
+                "Connection: close\r\n"
+        ]
+    ]);
+
+    $start = microtime(true);
+
+    $data = @file_get_contents(
+        $url,
+        false,
+        $context
+    );
+
+    $time = (int)round(
+        (microtime(true) - $start) * 1000
+    );
+
+    $headers = [];
+
+    if (function_exists('http_get_last_response_headers')) {
+        $headers = http_get_last_response_headers();
+
+        if (!is_array($headers)) {
+            $headers = [];
+        }
+    }
+
+    $httpCode = null;
+
+    foreach ($headers as $header) {
+        if (
+            preg_match(
+                '/HTTP\/\d+(?:\.\d+)?\s+(\d+)/i',
+                $header,
+                $m
+            )
+        ) {
+            $httpCode = (int)$m[1];
+        }
+    }
+
+    if ($data === false) {
+        return [
+            'ok' => false,
+            'http_code' => $httpCode,
+            'time' => $time,
+            'data' => null,
+            'error' => 'Не удалось получить данные от УТМ',
+            'url' => $url
+        ];
+    }
+
+    if ($httpCode !== null && $httpCode >= 400) {
+        return [
+            'ok' => false,
+            'http_code' => $httpCode,
+            'time' => $time,
+            'data' => $data,
+            'error' => 'УТМ вернул HTTP ' . $httpCode,
+            'url' => $url
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'http_code' => $httpCode ?? 200,
+        'time' => $time,
+        'data' => $data,
+        'error' => null,
+        'url' => $url
+    ];
+}
+
+
+/**
+ * ============================================================
+ * Получение списка документов УТМ
+ * ============================================================
+ */
+function syncGetDbList(
+    string $ip,
+    int $port,
+    string $direction,
+    int $limit = 100,
+    int $offset = 0
+): array {
+    $endpoint = $direction === 'incoming'
+        ? '/api/db/in/list'
+        : '/api/db/out/list';
+
+    $path =
+        $endpoint .
+        '?limit=' . $limit .
+        '&offset=' . $offset;
+
+    $response = syncHttpGet(
+        $ip,
+        $port,
+        $path
+    );
+
+    if (!$response['ok']) {
+        return $response;
+    }
+
+    $json = json_decode(
+        (string)$response['data'],
+        true
+    );
+
+    if (!is_array($json)) {
+        return [
+            'ok' => false,
+            'http_code' => $response['http_code'],
+            'time' => $response['time'],
+            'data' => null,
+            'error' => 'УТМ вернул не JSON',
+            'url' => $response['url']
+        ];
+    }
+
+    return [
+        'ok' => true,
+        'http_code' => $response['http_code'],
+        'time' => $response['time'],
+        'data' => $json,
+        'error' => null,
+        'url' => $response['url']
+    ];
+}
+
+
+/**
+ * ============================================================
+ * Получение /opt/out
+ * ============================================================
+ */
+function syncGetOutQueue(
+    string $ip,
+    int $port
+): array {
+    return syncHttpGet(
+        $ip,
+        $port,
+        '/opt/out'
+    );
+}
+
+
+/**
+ * ============================================================
+ * Преобразование URL в относительный путь
+ * ============================================================
+ */
+function syncNormalizeDocumentPath(
+    string $url,
+    string $ip,
+    int $port
+): ?string {
+    $url = trim($url);
+
+    if ($url === '') {
+        return null;
+    }
+
+    $parsed = parse_url($url);
+
+    if (is_array($parsed) && isset($parsed['path'])) {
+        $path = $parsed['path'];
+
+        if ($path !== '') {
+            return $path;
+        }
+    }
+
+    if (str_starts_with($url, '/')) {
+        return $url;
+    }
+
+    return null;
+}
+
+
+/**
+ * ============================================================
+ * Загрузка XML документа
+ * ============================================================
+ */
+function syncFetchDocument(
+    string $ip,
+    int $port,
+    string $url
+): array {
+    $path = syncNormalizeDocumentPath(
+        $url,
+        $ip,
+        $port
+    );
+
+    if ($path === null) {
+        return [
+            'ok' => false,
+            'error' => 'Некорректный URL документа',
+            'url' => $url,
+            'data' => null
+        ];
+    }
+
+    return syncHttpGet(
+        $ip,
+        $port,
+        $path,
+        30
+    );
+}
+
+
+/**
+ * ============================================================
+ * LocalName XML элемента
+ * ============================================================
+ */
+function syncLocalName(
+    DOMElement $element
+): string {
+    $name = $element->localName;
+
+    if ($name !== null && $name !== '') {
+        return $name;
+    }
+
+    return $element->nodeName;
+}
+
+
+/**
+ * ============================================================
+ * Первый XML элемент
+ * ============================================================
+ */
+function syncFindFirst(
+    DOMDocument $dom,
+    string $localName
+): ?DOMElement {
+    $xpath = new DOMXPath($dom);
+
+    $nodes = $xpath->query(
+        '//*[local-name()="' .
+        $localName .
+        '"]'
+    );
+
+    if ($nodes === false || $nodes->length === 0) {
+        return null;
+    }
+
+    $node = $nodes->item(0);
+
+    return $node instanceof DOMElement
+        ? $node
+        : null;
+}
+
+
+/**
+ * ============================================================
+ * Первый текст
+ * ============================================================
+ */
+function syncText(
+    DOMDocument $dom,
+    string $localName
+): ?string {
+    $element = syncFindFirst(
+        $dom,
+        $localName
+    );
+
+    if (!$element) {
+        return null;
+    }
+
+    $value = trim(
+        $element->textContent
+    );
+
+    return $value === ''
+        ? null
+        : $value;
+}
+
+
+/**
+ * ============================================================
+ * Первый атрибут
+ * ============================================================
+ */
+function syncAttribute(
+    DOMDocument $dom,
+    string $localName,
+    string $attribute
+): ?string {
+    $element = syncFindFirst(
+        $dom,
+        $localName
+    );
+
+    if (!$element) {
+        return null;
+    }
+
+    if (!$element->hasAttribute($attribute)) {
+        return null;
+    }
+
+    $value = trim(
+        $element->getAttribute($attribute)
+    );
+
+    return $value === ''
+        ? null
+        : $value;
+}
+
+
+/**
+ * ============================================================
+ * Текст внутри конкретного элемента
+ * ============================================================
+ */
+function syncChildText(
+    DOMElement $parent,
+    string $localName
+): ?string {
+    foreach ($parent->getElementsByTagName('*') as $node) {
+
+        if (!$node instanceof DOMElement) {
+            continue;
+        }
+
+        if (syncLocalName($node) !== $localName) {
+            continue;
+        }
+
+        $value = trim(
+            $node->textContent
+        );
+
+        if ($value !== '') {
+            return $value;
+        }
+    }
+
+    return null;
+}
+
+
+/**
+ * ============================================================
+ * Безопасное число
+ * ============================================================
+ */
+function syncFloat(
+    ?string $value
+): ?float {
+    if ($value === null) {
+        return null;
+    }
+
+    $value = trim($value);
+
+    if ($value === '') {
+        return null;
+    }
+
+    $value = str_replace(',', '.', $value);
+
+    return is_numeric($value)
+        ? (float)$value
+        : null;
+}
+
+
+/**
+ * ============================================================
+ * Определяем тип документа
+ * ============================================================
+ */
+function syncDetectDocumentType(
+    string $url,
+    DOMDocument $dom
+): string {
+    $path = parse_url(
+        $url,
+        PHP_URL_PATH
+    );
+
+    if (is_string($path)) {
+
+        if (str_contains($path, '/Ticket/')) {
+            return 'Ticket';
+        }
+
+        if (str_contains($path, '/ReplyRests_v3/')) {
+            return 'ReplyRests_v3';
+        }
+
+        if (str_contains($path, '/ReplyRestsShop_v2/')) {
+            return 'ReplyRestsShop_v2';
+        }
+
+        if (str_contains($path, '/WayBill_v4/')) {
+            return 'WayBill_v4';
+        }
+
+        if (str_contains($path, '/TTNHISTORYF2REG/')) {
+            return 'TTNHISTORYF2REG';
+        }
+
+        if (str_contains($path, '/FORM2REGINFO/')) {
+            return 'FORM2REGINFO';
+        }
+    }
+
+    $root = $dom->documentElement;
+
+    if ($root instanceof DOMElement) {
+
+        $rootName = syncLocalName($root);
+
+        if ($rootName !== '') {
+            return $rootName;
+        }
+    }
+
+    return 'Unknown';
+}
+
+
+/**
+ * ============================================================
+ * Собираем позиции ReplyRests_v3
+ * ============================================================
+ */
+function syncCollectRestsItems(
+    DOMDocument $dom
+): array {
+    $xpath = new DOMXPath($dom);
+
+    $nodes = $xpath->query(
+        '//*[local-name()="StockPosition"]'
+    );
+
+    if ($nodes === false) {
+        return [];
+    }
+
+    $items = [];
+    $index = 0;
+
+    foreach ($nodes as $node) {
+
+        if (!$node instanceof DOMElement) {
+            continue;
+        }
+
+        $product = null;
+
+        foreach ($node->getElementsByTagName('*') as $child) {
+
+            if (
+                $child instanceof DOMElement &&
+                syncLocalName($child) === 'Product'
+            ) {
+                $product = $child;
+                break;
+            }
+        }
+
+        $product = $product instanceof DOMElement
+            ? $product
+            : $node;
+
+        $producer = null;
+
+        foreach ($product->getElementsByTagName('*') as $child) {
+
+            if (
+                $child instanceof DOMElement &&
+                syncLocalName($child) === 'Producer'
+            ) {
+                $producer = $child;
+                break;
+            }
+        }
+
+        $producer = $producer instanceof DOMElement
+            ? $producer
+            : $product;
+
+        $items[] = [
+            'item_index' => $index++,
+
+            'quantity' =>
+                syncChildText($node, 'Quantity'),
+
+            'inform_f1_reg_id' =>
+                syncChildText($node, 'InformF1RegId'),
+
+            'inform_f2_reg_id' =>
+                syncChildText($node, 'InformF2RegId'),
+
+            'alc_percent' =>
+                syncFloat(
+                    syncChildText($node, 'alcPercent')
+                ),
+
+            'alc_percent_min' =>
+                syncFloat(
+                    syncChildText($node, 'alcPercentMin')
+                ),
+
+            'alc_percent_max' =>
+                syncFloat(
+                    syncChildText($node, 'alcPercentMax')
+                ),
+
+            'full_name' =>
+                syncChildText($product, 'FullName'),
+
+            'alc_code' =>
+                syncChildText($product, 'AlcCode'),
+
+            'capacity' =>
+                syncFloat(
+                    syncChildText($product, 'Capacity')
+                ),
+
+            'unit_type' =>
+                syncChildText($product, 'UnitType'),
+
+            'alc_volume' =>
+                syncFloat(
+                    syncChildText($product, 'AlcVolume')
+                ),
+
+            'product_v_code' =>
+                syncChildText($product, 'ProductVCode'),
+
+            'producer_client_reg_id' =>
+                syncChildText($producer, 'ClientRegId'),
+
+            'producer_inn' =>
+                syncChildText($producer, 'INN'),
+
+            'producer_kpp' =>
+                syncChildText($producer, 'KPP'),
+
+            'producer_full_name' =>
+                syncChildText($producer, 'FullName'),
+
+            'producer_short_name' =>
+                syncChildText($producer, 'ShortName'),
+
+            'producer_country' =>
+                syncChildText($producer, 'Country'),
+
+            'producer_region_code' =>
+                syncChildText($producer, 'RegionCode'),
+
+            'producer_address' =>
+                syncChildText($producer, 'address'),
+
+            'raw_xml' =>
+                $dom->saveXML($node)
+        ];
+    }
+
+    return $items;
+}
+
+
+/**
+ * ============================================================
+ * Собираем позиции WayBill
+ *
+ * ВАЖНО:
+ * Здесь дополнительно извлекаются все:
+ *
+ *   ce:amc
+ *
+ * находящиеся внутри текущей Position.
+ * ============================================================
+ */
+function syncCollectWayBillItems(
+    DOMDocument $dom
+): array {
+    $xpath = new DOMXPath($dom);
+
+    $nodes = $xpath->query(
+        '//*[local-name()="Position"]'
+    );
+
+    if ($nodes === false) {
+        return [];
+    }
+
+    $items = [];
+    $index = 0;
+
+    foreach ($nodes as $node) {
+
+        if (!$node instanceof DOMElement) {
+            continue;
+        }
+
+        /*
+         * ----------------------------------------------------
+         * PRODUCT
+         * ----------------------------------------------------
+         */
+        $product = $node;
+
+        foreach ($node->getElementsByTagName('*') as $child) {
+
+            if (
+                $child instanceof DOMElement &&
+                syncLocalName($child) === 'Product'
+            ) {
+                $product = $child;
+                break;
+            }
+        }
+
+
+        /*
+         * ----------------------------------------------------
+         * PRODUCER
+         * ----------------------------------------------------
+         */
+        $producer = $product;
+
+        foreach ($product->getElementsByTagName('*') as $child) {
+
+            if (
+                $child instanceof DOMElement &&
+                syncLocalName($child) === 'Producer'
+            ) {
+                $producer = $child;
+                break;
+            }
+        }
+
+
+        /*
+         * ----------------------------------------------------
+         * AMC / МАРКИ
+         * ----------------------------------------------------
+         *
+         * В XML WayBill:
+         *
+         * <ce:amclist>
+         *     <ce:amc>...</ce:amc>
+         *     <ce:amc>...</ce:amc>
+         * </ce:amclist>
+         *
+         * Используем local-name(), поэтому namespace
+         * ce здесь не мешает.
+         */
+        $marks = [];
+
+        $markNodes = $xpath->query(
+            './/*[local-name()="amc"]',
+            $node
+        );
+
+        if ($markNodes !== false) {
+
+            foreach ($markNodes as $markNode) {
+
+                if (!$markNode instanceof DOMElement) {
+                    continue;
+                }
+
+                $amc = trim(
+                    (string)$markNode->textContent
+                );
+
+                if ($amc === '') {
+                    continue;
+                }
+
+                $marks[] = $amc;
+            }
+        }
+
+
+        /*
+         * ----------------------------------------------------
+         * ПОЗИЦИЯ
+         * ----------------------------------------------------
+         */
+        $items[] = [
+            'item_index' => $index++,
+
+            'quantity' =>
+                syncChildText($node, 'Quantity')
+                ?? syncChildText($node, 'amount'),
+
+            'inform_f1_reg_id' =>
+                syncChildText($node, 'InformF1RegId'),
+
+            'inform_f2_reg_id' =>
+                syncChildText($node, 'InformF2RegId'),
+
+            'alc_percent' =>
+                syncFloat(
+                    syncChildText($node, 'alcPercent')
+                ),
+
+            'alc_percent_min' =>
+                syncFloat(
+                    syncChildText($node, 'alcPercentMin')
+                ),
+
+            'alc_percent_max' =>
+                syncFloat(
+                    syncChildText($node, 'alcPercentMax')
+                ),
+
+            'full_name' =>
+                syncChildText($product, 'FullName')
+                ?? syncChildText($node, 'FullName'),
+
+            'alc_code' =>
+                syncChildText($product, 'AlcCode')
+                ?? syncChildText($node, 'AlcCode'),
+
+            'capacity' =>
+                syncFloat(
+                    syncChildText($product, 'Capacity')
+                ),
+
+            'unit_type' =>
+                syncChildText($product, 'UnitType'),
+
+            'alc_volume' =>
+                syncFloat(
+                    syncChildText($product, 'AlcVolume')
+                ),
+
+            'product_v_code' =>
+                syncChildText($product, 'ProductVCode'),
+
+            'producer_client_reg_id' =>
+                syncChildText($producer, 'ClientRegId'),
+
+            'producer_inn' =>
+                syncChildText($producer, 'INN'),
+
+            'producer_kpp' =>
+                syncChildText($producer, 'KPP'),
+
+            'producer_full_name' =>
+                syncChildText($producer, 'FullName'),
+
+            'producer_short_name' =>
+                syncChildText($producer, 'ShortName'),
+
+            'producer_country' =>
+                syncChildText($producer, 'Country'),
+
+            'producer_region_code' =>
+                syncChildText($producer, 'RegionCode'),
+
+            'producer_address' =>
+                syncChildText($producer, 'address'),
+
+            /*
+             * Список AMC для этой позиции.
+             */
+            'marks' =>
+                $marks,
+
+            'raw_xml' =>
+                $dom->saveXML($node)
+        ];
+    }
+
+    return $items;
+}
+
+
+/**
+ * ============================================================
+ * Извлекаем позиции документа
+ * ============================================================
+ */
+function syncCollectItems(
+    string $documentType,
+    DOMDocument $dom
+): array {
+
+    switch ($documentType) {
+
+        case 'ReplyRests_v3':
+        case 'ReplyRestsShop_v2':
+            return syncCollectRestsItems($dom);
+
+        case 'WayBill_v4':
+            return syncCollectWayBillItems($dom);
+
+        default:
+            return [];
+    }
+}
+
+
+/**
+ * ============================================================
+ * Извлекаем основные реквизиты
+ * ============================================================
+ */
+function syncParseDocument(
+    string $xml,
+    string $sourceUrl
+): array {
+
+    $dom = new DOMDocument();
+
+    $previous = libxml_use_internal_errors(true);
+
+    $loaded = $dom->loadXML(
+        $xml,
+        LIBXML_NONET |
+        LIBXML_NOBLANKS
+    );
+
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+
+    if (!$loaded) {
+        throw new RuntimeException(
+            'Не удалось разобрать XML документа'
+        );
+    }
+
+    $documentType = syncDetectDocumentType(
+        $sourceUrl,
+        $dom
+    );
+
+
+    /*
+     * -----------------------------------------------------
+     * ИДЕНТИФИКАТОР
+     * -----------------------------------------------------
+     */
+
+    $identity =
+        syncText($dom, 'Identity');
+
+    $docId =
+        syncText($dom, 'DocId');
+
+    $wbRegId =
+        syncText($dom, 'WBRegId');
+
+    $documentId = null;
+
+    switch ($documentType) {
+
+        case 'Ticket':
+
+            $documentId =
+                $identity
+                ?? $docId;
+
+            break;
+
+        case 'WayBill_v4':
+
+            $documentId =
+                $identity
+                ?? $wbRegId;
+
+            break;
+
+        case 'FORM2REGINFO':
+
+            $documentId =
+                $identity
+                ?? $wbRegId;
+
+            break;
+
+        case 'TTNHISTORYF2REG':
+
+            $documentId =
+                $wbRegId
+                ?? $identity;
+
+            break;
+
+        case 'ReplyRests_v3':
+        case 'ReplyRestsShop_v2':
+
+            $documentId =
+                syncText($dom, 'TransportId')
+                ?? $identity
+                ?? $wbRegId;
+
+            break;
+
+        default:
+
+            $documentId =
+                $identity
+                ?? $docId
+                ?? $wbRegId;
+    }
+
+
+    /*
+     * WayBill и FORM2 могут иметь одинаковый Identity.
+     * Добавляем тип в ключ.
+     */
+    if (
+        $documentId !== null &&
+        $documentType !== 'Ticket'
+    ) {
+        $documentId =
+            $documentType . ':' . $documentId;
+    }
+
+
+    /*
+     * -----------------------------------------------------
+     * НОМЕР
+     * -----------------------------------------------------
+     */
+
+    $number = null;
+
+    switch ($documentType) {
+
+        case 'WayBill_v4':
+        case 'FORM2REGINFO':
+
+            $number =
+                syncText($dom, 'WBNUMBER')
+                ?? syncText($dom, 'NUMBER');
+
+            break;
+
+        case 'Ticket':
+
+            $number =
+                syncText($dom, 'RegID');
+
+            break;
+
+        default:
+
+            $number =
+                syncText($dom, 'NUMBER')
+                ?? syncText($dom, 'WBNUMBER')
+                ?? $wbRegId;
+    }
+
+
+    /*
+     * -----------------------------------------------------
+     * ДАТА
+     * -----------------------------------------------------
+     */
+
+    $documentDate =
+        syncText($dom, 'DocumentDate')
+        ?? syncText($dom, 'DocDate')
+        ?? syncText($dom, 'TicketDate')
+        ?? syncText($dom, 'WBDate')
+        ?? syncText($dom, 'RestsDate')
+        ?? syncText($dom, 'EGAISFixDate');
+
+
+    /*
+     * -----------------------------------------------------
+     * ОТПРАВИТЕЛЬ
+     * -----------------------------------------------------
+     */
+
+    $sender =
+        syncText($dom, 'Sender')
+        ?? syncText($dom, 'Shipper')
+        ?? syncText($dom, 'ClientRegId');
+
+
+    /*
+     * -----------------------------------------------------
+     * ПОЛУЧАТЕЛЬ
+     * -----------------------------------------------------
+     */
+
+    $receiver =
+        syncText($dom, 'Receiver')
+        ?? syncText($dom, 'Consignee');
+
+
+    /*
+     * -----------------------------------------------------
+     * СТАТУС
+     * -----------------------------------------------------
+     */
+
+    $status = null;
+
+    if ($documentType === 'Ticket') {
+
+        $status =
+            syncText($dom, 'Conclusion')
+            ?? syncText($dom, 'Status')
+            ?? syncText($dom, 'State');
+
+    } else {
+
+        $status =
+            syncText($dom, 'Status')
+            ?? syncText($dom, 'State');
+    }
+
+    $statusCode =
+        syncText($dom, 'StatusCode');
+
+
+    /*
+     * -----------------------------------------------------
+     * КОММЕНТАРИЙ
+     * -----------------------------------------------------
+     */
+
+    $comment =
+        syncText($dom, 'Comments')
+        ?? syncText($dom, 'Comment');
+
+
+    /*
+     * -----------------------------------------------------
+     * ПОЗИЦИИ
+     * -----------------------------------------------------
+ */
+
+    $items = syncCollectItems(
+        $documentType,
+        $dom
+    );
+
+    return [
+        'document_id' => $documentId,
+        'document_type' => $documentType,
+        'number' => $number,
+        'document_date' => $documentDate,
+        'sender' => $sender,
+        'receiver' => $receiver,
+        'status' => $status,
+        'status_code' => $statusCode,
+        'comment' => $comment,
+        'items' => $items,
+        'raw_xml' => $xml,
+        'dom' => $dom
+    ];
+}
+
+
+/**
+ * ============================================================
+ * Сохранение позиции
+ * ============================================================
+ */
+function syncSaveItem(
+    PDO $db,
+    int $documentDbId,
+    int $index,
+    array $item
+): void {
+
+    $now = date('Y-m-d H:i:s');
+
+    $sql = <<<SQL
+INSERT INTO document_items (
+    document_id,
+    item_index,
+    quantity,
+    inform_f1_reg_id,
+    inform_f2_reg_id,
+    alc_percent,
+    alc_percent_min,
+    alc_percent_max,
+    full_name,
+    alc_code,
+    capacity,
+    unit_type,
+    alc_volume,
+    product_v_code,
+    producer_client_reg_id,
+    producer_inn,
+    producer_kpp,
+    producer_full_name,
+    producer_short_name,
+    producer_country,
+    producer_region_code,
+    producer_address,
+    raw_xml,
+    created_at,
+    updated_at
+)
+VALUES (
+    :document_id,
+    :item_index,
+    :quantity,
+    :inform_f1_reg_id,
+    :inform_f2_reg_id,
+    :alc_percent,
+    :alc_percent_min,
+    :alc_percent_max,
+    :full_name,
+    :alc_code,
+    :capacity,
+    :unit_type,
+    :alc_volume,
+    :product_v_code,
+    :producer_client_reg_id,
+    :producer_inn,
+    :producer_kpp,
+    :producer_full_name,
+    :producer_short_name,
+    :producer_country,
+    :producer_region_code,
+    :producer_address,
+    :raw_xml,
+    :created_at,
+    :updated_at
+)
+ON CONFLICT(document_id, item_index)
+DO UPDATE SET
+    quantity = excluded.quantity,
+    inform_f1_reg_id = excluded.inform_f1_reg_id,
+    inform_f2_reg_id = excluded.inform_f2_reg_id,
+    alc_percent = excluded.alc_percent,
+    alc_percent_min = excluded.alc_percent_min,
+    alc_percent_max = excluded.alc_percent_max,
+    full_name = excluded.full_name,
+    alc_code = excluded.alc_code,
+    capacity = excluded.capacity,
+    unit_type = excluded.unit_type,
+    alc_volume = excluded.alc_volume,
+    product_v_code = excluded.product_v_code,
+    producer_client_reg_id = excluded.producer_client_reg_id,
+    producer_inn = excluded.producer_inn,
+    producer_kpp = excluded.producer_kpp,
+    producer_full_name = excluded.producer_full_name,
+    producer_short_name = excluded.producer_short_name,
+    producer_country = excluded.producer_country,
+    producer_region_code = excluded.producer_region_code,
+    producer_address = excluded.producer_address,
+    raw_xml = excluded.raw_xml,
+    updated_at = excluded.updated_at
+SQL;
+
+    $stmt = $db->prepare($sql);
+
+    $stmt->execute([
+        ':document_id' =>
+            $documentDbId,
+
+        ':item_index' =>
+            $index,
+
+        ':quantity' =>
+            $item['quantity'] ?? null,
+
+        ':inform_f1_reg_id' =>
+            $item['inform_f1_reg_id'] ?? null,
+
+        ':inform_f2_reg_id' =>
+            $item['inform_f2_reg_id'] ?? null,
+
+        ':alc_percent' =>
+            $item['alc_percent'] ?? null,
+
+        ':alc_percent_min' =>
+            $item['alc_percent_min'] ?? null,
+
+        ':alc_percent_max' =>
+            $item['alc_percent_max'] ?? null,
+
+        ':full_name' =>
+            $item['full_name'] ?? null,
+
+        ':alc_code' =>
+            $item['alc_code'] ?? null,
+
+        ':capacity' =>
+            $item['capacity'] ?? null,
+
+        ':unit_type' =>
+            $item['unit_type'] ?? null,
+
+        ':alc_volume' =>
+            $item['alc_volume'] ?? null,
+
+        ':product_v_code' =>
+            $item['product_v_code'] ?? null,
+
+        ':producer_client_reg_id' =>
+            $item['producer_client_reg_id'] ?? null,
+
+        ':producer_inn' =>
+            $item['producer_inn'] ?? null,
+
+        ':producer_kpp' =>
+            $item['producer_kpp'] ?? null,
+
+        ':producer_full_name' =>
+            $item['producer_full_name'] ?? null,
+
+        ':producer_short_name' =>
+            $item['producer_short_name'] ?? null,
+
+        ':producer_country' =>
+            $item['producer_country'] ?? null,
+
+        ':producer_region_code' =>
+            $item['producer_region_code'] ?? null,
+
+        ':producer_address' =>
+            $item['producer_address'] ?? null,
+
+        ':raw_xml' =>
+            $item['raw_xml'] ?? null,
+
+        ':created_at' =>
+            $now,
+
+        ':updated_at' =>
+            $now
+    ]);
+
+
+    /*
+     * ========================================================
+     * Сохраняем марки AMC / DataMatrix
+     * ========================================================
+     */
+
+    if (
+        !empty($item['marks']) &&
+        is_array($item['marks'])
+    ) {
+
+        /*
+         * Получаем реальный ID позиции.
+         */
+        $itemStmt = $db->prepare(
+            'SELECT id
+             FROM document_items
+             WHERE document_id = ?
+               AND item_index = ?
+             LIMIT 1'
+        );
+
+        $itemStmt->execute([
+            $documentDbId,
+            $index
+        ]);
+
+        $itemId = $itemStmt->fetchColumn();
+
+        if ($itemId !== false) {
+
+            /*
+             * UNIQUE(document_item_id, amc)
+             * + INSERT OR IGNORE
+             * защищают от повторов.
+             */
+            $markStmt = $db->prepare(
+                'INSERT OR IGNORE INTO document_item_marks
+                (
+                    document_item_id,
+                    amc,
+                    created_at
+                )
+                VALUES (?, ?, ?)'
+            );
+
+            foreach ($item['marks'] as $amc) {
+
+                $amc = trim(
+                    (string)$amc
+                );
+
+                if ($amc === '') {
+                    continue;
+                }
+
+                $markStmt->execute([
+                    (int)$itemId,
+                    $amc,
+                    $now
+                ]);
+            }
+        }
+    }
+}
+
+
+/**
+ * ============================================================
+ * Удаление старых позиций
+ * ============================================================
+ */
+function syncDeleteItems(
+    PDO $db,
+    int $documentDbId
+): void {
+
+    /*
+     * document_item_marks имеет:
+     *
+     * FOREIGN KEY(document_item_id)
+     * REFERENCES document_items(id)
+     * ON DELETE CASCADE
+     *
+     * Поэтому при удалении позиции её марки тоже удалятся.
+     */
+    $stmt = $db->prepare(
+        'DELETE FROM document_items WHERE document_id = ?'
+    );
+
+    $stmt->execute([
+        $documentDbId
+    ]);
+}
+
+
+/**
+ * ============================================================
+ * Сохранение документа
+ * ============================================================
+ */
+function syncSaveOneDocument(
+    PDO $db,
+    int $utmId,
+    string $direction,
+    string $sourceUrl,
+    string $xml
+): array {
+
+    $parsed = syncParseDocument(
+        $xml,
+        $sourceUrl
+    );
+
+    $documentDbId = saveDocument(
+        $db,
+        $utmId,
+        $parsed['document_id'],
+        $parsed['document_type'],
+        $direction,
+        $parsed['number'],
+        $parsed['document_date'],
+        $parsed['sender'],
+        $parsed['receiver'],
+        $parsed['status'],
+        $parsed['status_code'],
+        $parsed['raw_xml']
+    );
+
+
+    /*
+     * Полностью обновляем позиции документа.
+     *
+     * Старые document_items удаляются.
+     * Их document_item_marks удаляются каскадно.
+     */
+    syncDeleteItems(
+        $db,
+        (int)$documentDbId
+    );
+
+
+    $savedItems = 0;
+
+    foreach ($parsed['items'] as $item) {
+
+        syncSaveItem(
+            $db,
+            (int)$documentDbId,
+            (int)$item['item_index'],
+            $item
+        );
+
+        $savedItems++;
+    }
+
+
+    /*
+     * Если Ticket содержит комментарий,
+     * сохраняем его в историю статусов.
+     */
+    if (
+        $parsed['document_type'] === 'Ticket' &&
+        !empty($parsed['comment'])
+    ) {
+
+        $stmt = $db->prepare(
+            'SELECT id
+             FROM documents
+             WHERE id = ?
+             LIMIT 1'
+        );
+
+        $stmt->execute([
+            (int)$documentDbId
+        ]);
+
+        $exists = $stmt->fetchColumn();
+
+        if ($exists) {
+
+            $stmt = $db->prepare(
+                'INSERT INTO document_status_history
+                (
+                    document_id,
+                    old_status,
+                    new_status,
+                    message,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?)'
+            );
+
+            $stmt->execute([
+                (int)$documentDbId,
+                null,
+                $parsed['status'],
+                $parsed['comment'],
+                date('Y-m-d H:i:s')
+            ]);
+        }
+    }
+
+
+    return [
+        'db_id' =>
+            (int)$documentDbId,
+
+        'document_id' =>
+            $parsed['document_id'],
+
+        'document_type' =>
+            $parsed['document_type'],
+
+        'direction' =>
+            $direction,
+
+        'number' =>
+            $parsed['number'],
+
+        'document_date' =>
+            $parsed['document_date'],
+
+        'sender' =>
+            $parsed['sender'],
+
+        'receiver' =>
+            $parsed['receiver'],
+
+        'status' =>
+            $parsed['status'],
+
+        'status_code' =>
+            $parsed['status_code'],
+
+        'items' =>
+            $savedItems
+    ];
+}
+
+
+/**
+ * ============================================================
+ * Главная синхронизация
+ * ============================================================
+ */
+function syncUtm(
+    PDO $db,
+    array $utm,
+    int $limit = 100
+): array {
+
+    $utmId = (int)$utm['id'];
+    $ip = (string)$utm['ip'];
+    $port = (int)$utm['port'];
+
+    $result = [
+        'success' => true,
+
+        'utm' => [
+            'id' => $utmId,
+            'name' => $utm['name'] ?? '',
+            'ip' => $ip,
+            'port' => $port
+        ],
+
+        'incoming' => [
+            'found' => 0,
+            'saved' => 0,
+            'errors' => 0
+        ],
+
+        'outgoing' => [
+            'found' => 0,
+            'saved' => 0,
+            'errors' => 0
+        ],
+
+        'queue' => [
+            'found' => 0,
+            'saved' => 0,
+            'errors' => 0
+        ],
+
+        'documents' => [],
+
+        'errors' => []
+    ];
+
+
+    /*
+     * =====================================================
+     * 1. ВХОДЯЩИЕ
+     * =====================================================
+     */
+
+    $incoming = syncGetDbList(
+        $ip,
+        $port,
+        'incoming',
+        $limit,
+        0
+    );
+
+    if ($incoming['ok']) {
+
+        $data = $incoming['data'];
+
+        $rows =
+            $data['data']['rows']
+            ?? $data['data']
+            ?? $data['rows']
+            ?? [];
+
+        if (is_array($rows)) {
+            $result['incoming']['found'] =
+                count($rows);
+        }
+
+    } else {
+
+        $result['incoming']['errors']++;
+
+        $result['errors'][] = [
+            'stage' => 'incoming_list',
+            'error' => $incoming['error']
+        ];
+    }
+
+
+    /*
+     * =====================================================
+     * 2. ИСХОДЯЩИЕ
+     * =====================================================
+     */
+
+    $outgoing = syncGetDbList(
+        $ip,
+        $port,
+        'outgoing',
+        $limit,
+        0
+    );
+
+    if ($outgoing['ok']) {
+
+        $data = $outgoing['data'];
+
+        $rows =
+            $data['data']['rows']
+            ?? $data['data']
+            ?? $data['rows']
+            ?? [];
+
+        if (is_array($rows)) {
+            $result['outgoing']['found'] =
+                count($rows);
+        }
+
+    } else {
+
+        $result['outgoing']['errors']++;
+
+        $result['errors'][] = [
+            'stage' => 'outgoing_list',
+            'error' => $outgoing['error']
+        ];
+    }
+
+
+    /*
+     * =====================================================
+     * 3. /opt/out
+     * =====================================================
+     */
+
+    $queue = syncGetOutQueue(
+        $ip,
+        $port
+    );
+
+    if (!$queue['ok']) {
+
+        $result['queue']['errors']++;
+
+        $result['errors'][] = [
+            'stage' => 'opt_out',
+            'error' => $queue['error']
+        ];
+
+        addEvent(
+            $db,
+            $utmId,
+            'error',
+            'sync',
+            'Ошибка получения /opt/out',
+            json_encode(
+                $queue,
+                JSON_UNESCAPED_UNICODE |
+                JSON_UNESCAPED_SLASHES
+            )
+        );
+
+        return $result;
+    }
+
+
+    /*
+     * =====================================================
+     * 4. РАЗБОР /opt/out
+     * =====================================================
+     */
+
+    $queueXml = (string)$queue['data'];
+
+    $dom = new DOMDocument();
+
+    $previous = libxml_use_internal_errors(true);
+
+    $loaded = $dom->loadXML(
+        $queueXml,
+        LIBXML_NONET |
+        LIBXML_NOBLANKS
+    );
+
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+
+    if (!$loaded) {
+
+        $result['queue']['errors']++;
+
+        $result['errors'][] = [
+            'stage' => 'opt_out_xml',
+            'error' => 'Некорректный XML /opt/out'
+        ];
+
+        return $result;
+    }
+
+
+    $xpath = new DOMXPath($dom);
+
+    $nodes = $xpath->query(
+        '//*[local-name()="url"]'
+    );
+
+    if ($nodes === false) {
+        $nodes = [];
+    }
+
+    $result['queue']['found'] =
+        $nodes instanceof DOMNodeList
+            ? $nodes->length
+            : 0;
+
+
+    /*
+     * =====================================================
+     * 5. СКАЧИВАЕМ ДОКУМЕНТЫ
+     * =====================================================
+     */
+
+    if ($nodes instanceof DOMNodeList) {
+
+        foreach ($nodes as $node) {
+
+            if (!$node instanceof DOMElement) {
+                continue;
+            }
+
+            $sourceUrl = trim(
+                $node->textContent
+            );
+
+            if ($sourceUrl === '') {
+                continue;
+            }
+
+            $replyId = null;
+
+            if ($node->hasAttribute('replyId')) {
+
+                $replyId = trim(
+                    $node->getAttribute('replyId')
+                );
+            }
+
+
+            $document = syncFetchDocument(
+                $ip,
+                $port,
+                $sourceUrl
+            );
+
+            if (!$document['ok']) {
+
+                $result['queue']['errors']++;
+
+                $result['errors'][] = [
+                    'stage' => 'document',
+                    'url' => $sourceUrl,
+                    'reply_id' => $replyId,
+                    'error' => $document['error']
+                ];
+
+                continue;
+            }
+
+
+            try {
+
+                $saved = syncSaveOneDocument(
+                    $db,
+                    $utmId,
+                    'outgoing',
+                    $sourceUrl,
+                    (string)$document['data']
+                );
+
+                $result['queue']['saved']++;
+
+                $result['documents'][] = [
+                    'reply_id' => $replyId,
+                    'url' => $sourceUrl,
+                    'document' => $saved
+                ];
+
+            } catch (Throwable $e) {
+
+                $result['queue']['errors']++;
+
+                $result['errors'][] = [
+                    'stage' => 'save_document',
+                    'url' => $sourceUrl,
+                    'reply_id' => $replyId,
+                    'error' => $e->getMessage()
+                ];
+            }
+        }
+    }
+
+
+    /*
+     * =====================================================
+     * 6. EVENT
+     * =====================================================
+     */
+
+    addEvent(
+        $db,
+        $utmId,
+        count($result['errors']) > 0
+            ? 'warning'
+            : 'info',
+        'sync',
+        'Синхронизация УТМ завершена',
+        json_encode(
+            $result,
+            JSON_UNESCAPED_UNICODE |
+            JSON_UNESCAPED_SLASHES
+        )
+    );
+
+    return $result;
+}
+
+
+/*
+ * ============================================================
+ * CLI ENTRY POINT
+ * ============================================================
+ */
+
+if (PHP_SAPI === 'cli') {
+
+    $utmId = null;
+
+    foreach ($argv as $arg) {
+
+        if (
+            preg_match(
+                '/^--utm=(\d+)$/',
+                $arg,
+                $m
+            )
+        ) {
+            $utmId = (int)$m[1];
+            break;
+        }
+    }
+
+    if ($utmId === null) {
+
+        fwrite(
+            STDERR,
+            "Использование: php sync.php --utm=ID\n"
+        );
+
+        exit(1);
+    }
+
+    try {
+
+        $db = require __DIR__ . '/includes/database.php';
+
+        require_once __DIR__ . '/includes/utm_repository.php';
+
+        $utm = getUtm(
+            $db,
+            $utmId
+        );
+
+        if ($utm === null) {
+
+            throw new RuntimeException(
+                "УТМ с ID {$utmId} не найден в базе данных"
+            );
+        }
+
+        $result = syncUtm(
+            $db,
+            $utm
+        );
+
+        echo json_encode(
+            $result,
+            JSON_UNESCAPED_UNICODE |
+            JSON_UNESCAPED_SLASHES |
+            JSON_PRETTY_PRINT
+        );
+
+        echo PHP_EOL;
+
+        exit(
+            !empty($result['errors'])
+                ? 2
+                : 0
+        );
+
+    } catch (Throwable $e) {
+
+        fwrite(
+            STDERR,
+            json_encode(
+                [
+                    'success' => false,
+                    'error' => $e->getMessage(),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine()
+                ],
+                JSON_UNESCAPED_UNICODE |
+                JSON_UNESCAPED_SLASHES |
+                JSON_PRETTY_PRINT
+            ) . PHP_EOL
+        );
+
+        exit(1);
+    }
+}
