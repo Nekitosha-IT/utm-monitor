@@ -12,9 +12,9 @@ public sealed class MainForm:Form
  readonly Label state=new(){AutoSize=true,Text="Готово"}; readonly Timer timer=new(){Interval=600000}; readonly ComboBox utmPick=new(){DropDownStyle=ComboBoxStyle.DropDownList,Width=280};
  readonly TextBox docSearch=new(){Width=230};
 
- public MainForm(){Text="UTM Monitor — ЕГАИС";Width=1500;Height=900;MinimumSize=new(1150,700);StartPosition=FormStartPosition.CenterScreen;Font=new("Segoe UI",9F);
+ public MainForm(){Text="UTM Monitor — ЕГАИС v0.1";Width=1500;Height=900;MinimumSize=new(1150,700);StartPosition=FormStartPosition.CenterScreen;Font=new("Segoe UI",9F);
   var tabs=new TabControl{Dock=DockStyle.Fill}; tabs.TabPages.Add(BuildDashboard());tabs.TabPages.Add(BuildDocuments());tabs.TabPages.Add(BuildMarks());tabs.TabPages.Add(BuildCertificates());tabs.TabPages.Add(BuildHistory());tabs.TabPages.Add(BuildLog());Controls.Add(tabs);
-  Load+=async(_,_)=>{RefreshUtms();await CheckAll();}; FormClosed+=(_,_)=>{timer.Stop();api.Dispose();}; timer.Tick+=async(_,_)=>await CheckAll(); timer.Start();
+  Load+=async(_,_)=>{RefreshUtms();await CheckAll();if(SelectedUtm()!=null){await Sync();await LoadCertificates();LoadHistory();LoadEvents();}}; FormClosed+=(_,_)=>{timer.Stop();api.Dispose();}; timer.Tick+=async(_,_)=>await CheckAll(); timer.Start();
  }
  static DataGridView Grid()=>new(){Dock=DockStyle.Fill,ReadOnly=true,AllowUserToAddRows=false,AutoGenerateColumns=true,SelectionMode=DataGridViewSelectionMode.FullRowSelect,MultiSelect=false,AutoSizeColumnsMode=DataGridViewAutoSizeColumnsMode.Fill};
  Button Btn(string text,Action a){var b=new Button{Text=text,AutoSize=true,Height=30};b.Click+=(_,_)=>{try{a();}catch(Exception e){Write(e.ToString());}};return b;}
