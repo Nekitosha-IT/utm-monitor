@@ -9,6 +9,8 @@ internal static class Program
     static void Main()
     {
         ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
+        var form = new MainForm();
+        UpdateUi.Install(form);
+        Application.Run(form);
     }
 }
