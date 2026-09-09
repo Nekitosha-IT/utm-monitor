@@ -1,8 +1,13 @@
 name: .NET build
+
 on:
   push:
     branches: [ main ]
   pull_request:
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -11,12 +16,15 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+      - name: Set version
+        shell: pwsh
+        run: Add-Content $env:GITHUB_ENV "APP_VERSION=1.0.${{ github.run_number }}"
       - name: Restore
         run: dotnet restore UTMMonitor/UTMMonitor.csproj -r win-x64
       - name: Build
-        run: dotnet build UTMMonitor/UTMMonitor.csproj -c Release --no-restore
+        run: dotnet build UTMMonitor/UTMMonitor.csproj -c Release --no-restore -p:Version=$env:APP_VERSION
       - name: Publish single EXE
-        run: dotnet publish UTMMonitor/UTMMonitor.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --no-restore -o publish
+        run: dotnet publish UTMMonitor/UTMMonitor.csproj -c Release -r win-x64 --self-contained true -p:Version=$env:APP_VERSION -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true --no-restore -o publish
       - name: Verify EXE
         shell: pwsh
         run: |
@@ -24,7 +32,16 @@ jobs:
           if ($exe.Length -lt 1MB) { throw "Published EXE looks invalid: $($exe.Length) bytes" }
           Write-Host "EXE: $($exe.FullName)"
           Write-Host "SIZE: $($exe.Length) bytes"
+          Write-Host "VERSION: $env:APP_VERSION"
       - uses: actions/upload-artifact@v4
         with:
           name: UTM-Monitor-win-x64
           path: publish/UTM Monitor.exe
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.APP_VERSION }}
+          name: UTM Monitor ${{ env.APP_VERSION }}
+          generate_release_notes: true
+          files: publish/UTM Monitor.exe
