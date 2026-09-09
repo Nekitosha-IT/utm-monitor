@@ -138,13 +138,13 @@ public sealed class EgaisTtnMarkCheckForm : Form
 
     sealed class MarkCheckRow
     {
-        public int № { get; }
+        public int RowNumber { get; }
         public string Raw { get; }
         public string Type { get; }
         public string Rank { get; }
         public string Number { get; }
         public string Status { get; set; }
         public string Response { get; set; }
-        public MarkCheckRow(int n, string raw, string type, string rank, string number, string status, string response) { № = n; Raw = raw; Type = type; Rank = rank; Number = number; Status = status; Response = response; }
+        public MarkCheckRow(int n, string raw, string type, string rank, string number, string status, string response) { RowNumber = n; Raw = raw; Type = type; Rank = rank; Number = number; Status = status; Response = response; }
     }
 }
