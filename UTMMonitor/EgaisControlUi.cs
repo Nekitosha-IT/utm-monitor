@@ -17,6 +17,11 @@ public static class EgaisControlUi
             using var f = new EgaisDocumentControlForm();
             f.ShowDialog(form);
         });
+        egais.DropDownItems.Add("Проверка марок выбранной ТТН через УТМ…", null, (_, _) =>
+        {
+            using var f = new EgaisTtnMarkCheckForm();
+            f.ShowDialog(form);
+        });
         egais.DropDownItems.Add("Массовая проверка акцизных марок…", null, (_, _) =>
         {
             using var f = new MarkBatchForm();
