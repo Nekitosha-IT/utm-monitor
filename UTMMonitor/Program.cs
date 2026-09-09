@@ -11,6 +11,7 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         var form = new MainForm();
         UpdateUi.Install(form);
+        MarkBatchUi.Install(form);
         Application.Run(form);
     }
 }
