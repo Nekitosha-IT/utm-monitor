@@ -62,8 +62,17 @@ public static class UpdateUi
             if (mode == UpdateMode.Never) return;
             try
             {
+                await Task.Delay(1200);
+                if (form.IsDisposed) return;
                 var info = await service.CheckAsync();
-                if (!info.Available || form.IsDisposed) return;
+                if (form.IsDisposed) return;
+
+                if (!info.Available)
+                {
+                    if (info.Message.StartsWith("Не удалось", StringComparison.OrdinalIgnoreCase) || info.Message.StartsWith("GitHub вернул", StringComparison.OrdinalIgnoreCase))
+                        Debug.WriteLine("UTM Monitor updater: " + info.Message);
+                    return;
+                }
 
                 if (mode == UpdateMode.Auto)
                 {
@@ -76,7 +85,10 @@ public static class UpdateUi
                     "Обновление UTM Monitor", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                     await service.DownloadAndRestartAsync(info, form);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("UTM Monitor updater startup error: " + ex);
+            }
         }
 
         async Task CheckAndInstallAsync(bool interactive)
@@ -113,11 +125,11 @@ public static class UpdateUi
     {
         try
         {
-            if (!File.Exists(SettingsPath)) return UpdateMode.Ask;
+            if (!File.Exists(SettingsPath)) return UpdateMode.Auto;
             var value = File.ReadAllText(SettingsPath).Trim();
-            return Enum.TryParse<UpdateMode>(value, true, out var mode) ? mode : UpdateMode.Ask;
+            return Enum.TryParse<UpdateMode>(value, true, out var mode) ? mode : UpdateMode.Auto;
         }
-        catch { return UpdateMode.Ask; }
+        catch { return UpdateMode.Auto; }
     }
 
     static void SaveMode(UpdateMode mode)
