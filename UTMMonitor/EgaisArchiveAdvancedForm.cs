@@ -157,15 +157,15 @@ public sealed class EgaisArchiveAdvancedForm : Form
     static void Fill(ComboBox box, IEnumerable<string> values)
     {
         var current = box.SelectedItem?.ToString() ?? "Все"; var list = values.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(x => x).Take(500).ToList(); list.Insert(0, "Все");
-        box.SelectedValueChanged -= Dummy; box.DataSource = list; var idx = list.FindIndex(x => x.Equals(current, StringComparison.OrdinalIgnoreCase)); box.SelectedIndex = idx >= 0 ? idx : 0; box.SelectedValueChanged += Dummy;
+        box.DataSource = list; var idx = list.FindIndex(x => x.Equals(current, StringComparison.OrdinalIgnoreCase)); box.SelectedIndex = idx >= 0 ? idx : 0;
     }
-    static void Dummy(object? sender, EventArgs e) { }
 
     void ApplyFilter()
     {
         var q = search.Text.Trim(); var p = Pick(product); var s = Pick(supplier); var f = Pick(sender); var r = Pick(receiver); var st = Pick(status);
         shownRows = allRows.Where(x => (p == "Все" || Eq(x.Product, p)) && (s == "Все" || Eq(x.Supplier, s)) && (f == "Все" || Eq(x.From, f)) && (r == "Все" || Eq(x.To, r)) && (st == "Все" || Eq(x.Status, st)) && (string.IsNullOrWhiteSpace(q) || x.Search.Contains(q, StringComparison.OrdinalIgnoreCase))).OrderBy(x => x.Product).ThenBy(x => x.Supplier).ThenBy(x => x.Date).ThenBy(x => x.Mark).ToList();
-        grid.DataSource = shownRows.Select((x, i) => new { № = i + 1, Дата = x.FriendlyDate, Направление = x.Direction, Товар = x.Product, Поставщик = x.Supplier, От_кого = x.From, Кому = x.To, Марка = x.Mark, Type = x.Type, Rank = x.Rank, Number = x.NumberPart, Количество = x.Quantity, Цена = x.Price, ТТН = x.Number, Документ = x.DocumentId, Статус = x.Status }).ToList();
+        grid.DataSource = shownRows.Select((x, i) => new { N = i + 1, Дата = x.FriendlyDate, Направление = x.Direction, Товар = x.Product, Поставщик = x.Supplier, От_кого = x.From, Кому = x.To, Марка = x.Mark, Type = x.Type, Rank = x.Rank, Number = x.NumberPart, Количество = x.Quantity, Цена = x.Price, ТТН = x.Number, Документ = x.DocumentId, Статус = x.Status }).ToList();
+        if (grid.Columns.Contains("N")) grid.Columns["N"].HeaderText = "№";
         state.Text = $"Показано строк: {shownRows.Count} из {allRows.Count}";
     }
 
@@ -208,43 +208,59 @@ public sealed class EgaisArchiveAdvancedForm : Form
 
     static string FindJson(JsonElement e, string[] keys)
     {
-        if (e.ValueKind == JsonValueKind.Object) foreach (var p in e.EnumerateObject()) { if (keys.Any(k => p.Name.Equals(k, StringComparison.OrdinalIgnoreCase)) && p.Value.ValueKind is JsonValueKind.String or JsonValueKind.Number) return p.Value.ToString(); var v = FindJson(p.Value, keys); if (v != "") return v; }
-        else if (e.ValueKind == JsonValueKind.Array) foreach (var x in e.EnumerateArray()) { var v = FindJson(x, keys); if (v != "") return v; }
+        if (e.ValueKind == JsonValueKind.Object) foreach (var p in e.EnumerateObject()) { if (keys.Any(k => p.Name.Equals(k, StringComparison.OrdinalIgnoreCase)) && p.Value.ValueKind is JsonValueKind.String or JsonValueKind.Number) return p.Value.ToString(); var v = FindJson(p.Value, keys); if (!string.IsNullOrWhiteSpace(v)) return v; }
+        if (e.ValueKind == JsonValueKind.Array) foreach (var x in e.EnumerateArray()) { var v = FindJson(x, keys); if (!string.IsNullOrWhiteSpace(v)) return v; }
         return "";
     }
 
-    static List<ItemArchive> ExtractItems(string raw)
+    static List<RawItem> ExtractItems(string raw)
     {
-        var result = new List<ItemArchive>();
-        try { using var j = JsonDocument.Parse(raw); foreach (var key in new[] { "items", "positions", "products", "productItems", "product" }) if (FindArray(j.RootElement, key, out var ar)) { foreach (var x in ar.EnumerateArray()) result.Add(new ItemArchive(J(x, "name", "productName", "fullName", "goodsName", "alcoholName"), N(x, "quantity", "qty", "amount", "count"), N(x, "price", "sum", "cost"), J(x, "mark", "barcode", "exciseMark", "markCode", "barcodeDataMatrix", "amc"), J(x, "supplier", "supplierName", "sellerName", "producerName"))); if (result.Count > 0) return result; } } catch { }
-        try { var root = XDocument.Parse(raw).Root; if (root != null) foreach (var x in root.Descendants().Where(e => new[] { "Product", "Position", "ProductItem", "Item" }.Contains(e.Name.LocalName, StringComparer.OrdinalIgnoreCase))) result.Add(new ItemArchive(X(x, "name", "productName", "fullName", "goodsName", "alcoholName"), ND(x, "quantity", "qty", "amount", "count"), ND(x, "price", "sum", "cost", "priceWithVat"), X(x, "mark", "barcode", "exciseMark", "markCode", "barcodeDataMatrix", "amc"), X(x, "supplier", "supplierName", "sellerName", "producerName"))); } catch { }
-        return result;
-    }
-
-    static bool FindArray(JsonElement e, string key, out JsonElement value)
-    {
-        if (e.ValueKind == JsonValueKind.Object) foreach (var p in e.EnumerateObject()) { if (p.Name.Equals(key, StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind == JsonValueKind.Array) { value = p.Value; return true; } if (FindArray(p.Value, key, out value)) return true; }
-        else if (e.ValueKind == JsonValueKind.Array) foreach (var x in e.EnumerateArray()) if (FindArray(x, key, out value)) return true;
-        value = default; return false;
-    }
-    static string J(JsonElement e, params string[] keys) { foreach (var k in keys) if (e.TryGetProperty(k, out var p)) return p.ToString(); foreach (var p in e.EnumerateObject()) if (keys.Any(k => p.Name.Equals(k, StringComparison.OrdinalIgnoreCase))) return p.Value.ToString(); return ""; }
-    static string N(JsonElement e, params string[] keys) => J(e, keys);
-    static string X(XElement e, params string[] keys) => e.DescendantsAndSelf().FirstOrDefault(x => keys.Any(k => x.Name.LocalName.Equals(k, StringComparison.OrdinalIgnoreCase)))?.Value?.Trim() ?? "";
-    static string ND(XElement e, params string[] keys) => X(e, keys);
-
-    sealed record Context(string Product, string Supplier, string From, string To);
-    sealed record ItemArchive(string Product, string Quantity, string Price, string Mark, string Supplier);
-
-    sealed class ArchiveItem
-    {
-        public string DocumentId { get; } public string Date { get; } public string Direction { get; } public string TypeDocument { get; } public string Number { get; }
-        public string Mark { get; } public string Type { get; } public string Rank { get; } public string NumberPart { get; } public string Product { get; } public string Supplier { get; } public string From { get; } public string To { get; } public string Quantity { get; } public string Price { get; } public string Status { get; } public string Raw { get; }
-        public string FriendlyDate => DateTime.TryParse(Date, out var d) ? d.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss") : Date;
-        public string Search => string.Join(" | ", DocumentId, Date, Direction, TypeDocument, Number, Mark, Type, Rank, NumberPart, Product, Supplier, From, To, Quantity, Price, Status);
-
-        public ArchiveItem(DocumentRow d, string mark, string type, string rank, string numberPart, string product, string supplier, string from, string to, string itemMark, string quantity, string price, string status)
+        var result = new List<RawItem>();
+        try
         {
-            DocumentId = d.Id; Date = d.Date; Direction = d.Direction; TypeDocument = d.Type; Number = d.Number; Mark = mark; Type = type; Rank = rank; NumberPart = numberPart; Product = product; Supplier = supplier; From = from; To = to; Quantity = quantity; Price = price; Status = status; Raw = d.RawJson;
+            using var j = JsonDocument.Parse(raw);
+            foreach (var e in Walk(j.RootElement))
+            {
+                if (e.ValueKind != JsonValueKind.Object) continue;
+                var mark = FindJson(e, ["mark", "markCode", "barcode", "exciseMark", "egaisMark"]);
+                if (string.IsNullOrWhiteSpace(mark)) continue;
+                result.Add(new RawItem(FindJson(e, ["productName", "goodsName", "name"]), FindJson(e, ["supplier", "supplierName", "shipperName"]), FindJson(e, ["quantity", "count", "volume"]), FindJson(e, ["price", "cost"]), mark));
+            }
         }
+        catch { }
+        try
+        {
+            var x = XDocument.Parse(raw);
+            foreach (var e in x.Descendants().Where(z => z.HasElements))
+            {
+                var mark = e.Descendants().FirstOrDefault(z => ["mark", "markCode", "barcode", "exciseMark", "egaisMark"].Any(k => z.Name.LocalName.Equals(k, StringComparison.OrdinalIgnoreCase)))?.Value?.Trim() ?? "";
+                if (string.IsNullOrWhiteSpace(mark)) continue;
+                result.Add(new RawItem(Desc(e, ["productName", "goodsName", "name"]), Desc(e, ["supplier", "supplierName", "shipperName"]), Desc(e, ["quantity", "count", "volume"]), Desc(e, ["price", "cost"]), mark));
+            }
+        }
+        catch { }
+        return result.GroupBy(x => Normalize(x.Mark), StringComparer.OrdinalIgnoreCase).Select(x => x.First()).ToList();
+    }
+
+    static IEnumerable<JsonElement> Walk(JsonElement e)
+    {
+        yield return e;
+        if (e.ValueKind == JsonValueKind.Object) foreach (var p in e.EnumerateObject()) foreach (var x in Walk(p.Value)) yield return x;
+        if (e.ValueKind == JsonValueKind.Array) foreach (var x in e.EnumerateArray()) foreach (var y in Walk(x)) yield return y;
+    }
+
+    static string Desc(XElement e, string[] keys) => e.DescendantsAndSelf().FirstOrDefault(z => keys.Any(k => z.Name.LocalName.Equals(k, StringComparison.OrdinalIgnoreCase)))?.Value?.Trim() ?? "";
+
+    readonly record struct Context(string Product, string Supplier, string From, string To);
+    readonly record struct RawItem(string Product, string Supplier, string Quantity, string Price, string Mark);
+    readonly record struct ArchiveItem(DocumentRow Doc, string RawMark, string Type, string Rank, string NumberPart, string Product, string Supplier, string From, string To, string Mark, string Quantity, string Price, string Status)
+    {
+        public string Date => Doc.Date;
+        public string Direction => Doc.Direction;
+        public string Number => Doc.Number;
+        public string DocumentId => Doc.Id;
+        public string FriendlyDate => Date;
+        public string Raw => Doc.RawJson;
+        public string Search => string.Join(' ', new[] { Product, Supplier, From, To, Mark, Type, Rank, NumberPart, Number, DocumentId, Status });
     }
 }
