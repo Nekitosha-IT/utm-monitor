@@ -31,14 +31,15 @@ public sealed class UpdateService
             var tag = root.TryGetProperty("tag_name", out var tagEl) ? tagEl.GetString() ?? "" : "";
             var latest = Normalize(tag);
             string? url = null;
+
             if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
             {
                 foreach (var asset in assets.EnumerateArray())
                 {
                     var name = asset.TryGetProperty("name", out var n) ? n.GetString() : null;
-                    if (!string.Equals(name, "UTM Monitor.exe", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!IsApplicationAsset(name)) continue;
                     url = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() : null;
-                    break;
+                    if (!string.IsNullOrWhiteSpace(url)) break;
                 }
             }
 
@@ -50,6 +51,13 @@ public sealed class UpdateService
         {
             return new(false, CurrentVersion, CurrentVersion, null, $"Не удалось проверить обновления: {ex.Message}");
         }
+    }
+
+    static bool IsApplicationAsset(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name) || !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
+        var normalized = Path.GetFileNameWithoutExtension(name).Replace(".", "").Replace("-", "").Replace("_", "").Replace(" ", "");
+        return normalized.Equals("UTMMonitor", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task<bool> DownloadAndRestartAsync(UpdateInfo info, Form owner, CancellationToken ct = default)
@@ -67,13 +75,23 @@ public sealed class UpdateService
             }
 
             var currentExe = Environment.ProcessPath;
-            if (string.IsNullOrWhiteSpace(currentExe)) return false;
+            if (string.IsNullOrWhiteSpace(currentExe) || !File.Exists(currentExe)) return false;
 
-            var script = Path.Combine(Path.GetTempPath(), $"utm-monitor-update-{Guid.NewGuid():N}.cmd");
+            var script = Path.Combine(Path.GetTempPath(), $"utm-monitor-update-{Guid.NewGuid():N}.ps1");
             var pid = Environment.ProcessId;
-            var content = $"@echo off\r\nsetlocal\r\n:wait\r\ntimeout /t 2 /nobreak >nul\r\ntasklist /FI \"PID eq {pid}\" | find \"{pid}\" >nul\r\nif not errorlevel 1 goto wait\r\ncopy /Y \"{tempExe}\" \"{currentExe}\" >nul\r\nstart \"\" \"{currentExe}\"\r\ndel \"{tempExe}\" >nul 2>&1\r\ndel \"%~f0\" >nul 2>&1\r\n";
+            var escapedTemp = tempExe.Replace("'", "''");
+            var escapedCurrent = currentExe.Replace("'", "''");
+            var content = $"$ErrorActionPreference = 'Stop'\r\n$pidToWait = {pid}\r\n$temp = '{escapedTemp}'\r\n$target = '{escapedCurrent}'\r\nwhile (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 500 }}\r\nCopy-Item -LiteralPath $temp -Destination $target -Force\r\nStart-Process -FilePath $target\r\nRemove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue\r\nRemove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\r\n";
             await File.WriteAllTextAsync(script, content, ct);
-            Process.Start(new ProcessStartInfo("cmd.exe", $"/c start \"\" \"{script}\"") { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });
+
+            var psi = new ProcessStartInfo("powershell.exe")
+            {
+                Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script}\"",
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            Process.Start(psi);
             owner.BeginInvoke(owner.Close);
             return true;
         }
