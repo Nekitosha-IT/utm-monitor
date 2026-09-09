@@ -13,6 +13,7 @@ internal static class Program
         UpdateUi.Install(form);
         MarkBatchUi.Install(form);
         EgaisControlUi.Install(form);
+        LegacyTheme.Apply(form);
         Application.Run(form);
     }
 }
