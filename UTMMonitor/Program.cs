@@ -12,6 +12,7 @@ internal static class Program
         var form = new MainForm();
         UpdateUi.Install(form);
         MarkBatchUi.Install(form);
+        EgaisControlUi.Install(form);
         Application.Run(form);
     }
 }
