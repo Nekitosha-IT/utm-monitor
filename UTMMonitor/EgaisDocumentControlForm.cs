@@ -166,7 +166,7 @@ public sealed class EgaisDocumentControlForm : Form
     Button Button(string text, Action action) { var b = new Button { Text = text, AutoSize = true, Height = 32, Padding = new Padding(10, 0, 10, 0) }; b.Click += (_, _) => { try { action(); } catch (Exception ex) { MessageBox.Show(this, ex.Message, "UTM Monitor", MessageBoxButtons.OK, MessageBoxIcon.Error); } }; return b; }
 
     sealed class ParsedDocument { public List<ItemView> Items { get; } = []; }
-    sealed record ItemView(int №, string Наименование, double Количество, double Цена, string Марка);
+    sealed record ItemView(int RowNumber, string Наименование, double Количество, double Цена, string Марка);
     sealed class DocumentProperties
     {
         public string ID { get; } public string Номер { get; } public string Дата { get; } public string Тип { get; } public string Направление { get; } public string Статус { get; } public string Контроль { get; } public string ИсходныеДанные { get; }
